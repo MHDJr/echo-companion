@@ -1,6 +1,12 @@
 export type Message = {
   role: "user" | "echo";
   text: string;
+  id?: string;
+  timestamp?: number;
+  isError?: boolean;
+  canRetry?: boolean;
+  detectedLanguage?: string;
+  suggestedActions?: string[];
 };
 
 export type TaskCategory = "Work" | "Personal" | "Health" | "Learning";

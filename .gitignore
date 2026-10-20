@@ -22,3 +22,15 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.env.production
+.env.preview
+.env.development
+!.env.example
+
+# Supabase CLI
+.supabase/

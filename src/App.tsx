@@ -1,12 +1,16 @@
 import { useState, useEffect } from "react";
+import type { User } from "@supabase/supabase-js";
 import "./App.css";
 import type { CalendarEvent, Message, NavPage, TaskItem } from "./types";
 import { initialCalendarEvents, initialTasks } from "./data/mockData";
 import { taskService } from "./services/taskService";
+import { getCurrentUser, getCurrentSession, supabase } from "./services/supabaseClient";
+import { sendChatMessage } from "./services/aiService";
 import { MyDayView } from "./components/MyDayView";
 import { CalendarView } from "./components/CalendarView";
 import { TasksView } from "./components/TasksView";
 import { CompanionPanel } from "./components/CompanionPanel";
+import { AuthModal } from "./components/AuthModal";
 
 const suggestions = [
   { icon: "✍️", title: "Help me write", text: "Help me write something meaningful" },
@@ -21,6 +25,9 @@ function App() {
   const [voiceMode, setVoiceMode] = useState(false);
   const [activePage, setActivePage] = useState<NavPage>("Home");
   const [showCompanion, setShowCompanion] = useState(true);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [isAiResponding, setIsAiResponding] = useState(false);
 
   // Milestone 3: Local Persistent Tasks via TaskService
   const [tasks, setTasks] = useState<TaskItem[]>(() => {
@@ -49,19 +56,115 @@ function App() {
     });
   }, []);
 
-  function sendMessage(text = input) {
-    const message = text.trim();
-    if (!message) return;
+  // Sync Supabase Authentication state
+  useEffect(() => {
+    getCurrentUser().then((u) => setCurrentUser(u));
 
-    setMessages((current) => [
-      ...current,
-      { role: "user", text: message },
-      {
-        role: "echo",
-        text: "I'm here. Echo's AI connection isn't enabled yet, but we're building the foundation. Soon, I'll be able to help you with this.",
-      },
-    ]);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setCurrentUser(session?.user ?? null);
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  async function sendMessage(text = input) {
+    const message = text.trim();
+    if (!message || isAiResponding) return;
+
+    const userMessage: Message = {
+      role: "user",
+      text: message,
+      id: `msg-${Date.now()}-u`,
+      timestamp: Date.now(),
+    };
+
+    setMessages((current) => [...current, userMessage]);
     setInput("");
+
+    // Verify authenticated session before calling Edge Function
+    const session = await getCurrentSession();
+    if (!session || !session.access_token) {
+      setMessages((current) => [
+        ...current,
+        {
+          role: "echo",
+          text: "Echo requires a secure authenticated connection. Please sign in or use the quick demo account to continue.",
+          id: `msg-${Date.now()}-e`,
+          timestamp: Date.now(),
+          isError: true,
+          canRetry: true,
+        },
+      ]);
+      setAuthModalOpen(true);
+      return;
+    }
+
+    setIsAiResponding(true);
+
+    try {
+      const response = await sendChatMessage(message, {
+        activePage,
+        history: messages,
+      });
+
+      setMessages((current) => [
+        ...current,
+        {
+          role: "echo",
+          text: response.reply,
+          id: `msg-${Date.now()}-e`,
+          timestamp: Date.now(),
+          detectedLanguage: response.detectedLanguage,
+          suggestedActions: response.suggestedActions,
+        },
+      ]);
+    } catch (err: unknown) {
+      const errorMsg =
+        err instanceof Error
+          ? err.message
+          : "Echo was unable to complete that thought. Please try again.";
+
+      setMessages((current) => [
+        ...current,
+        {
+          role: "echo",
+          text: errorMsg,
+          id: `msg-${Date.now()}-e`,
+          timestamp: Date.now(),
+          isError: true,
+          canRetry: true,
+        },
+      ]);
+    } finally {
+      setIsAiResponding(false);
+    }
+  }
+
+  async function handleExecuteSuggestedAction(actionText: string) {
+    try {
+      const created = await taskService.createTask({
+        title: actionText,
+        completed: false,
+        category: "Work",
+        priority: "Medium",
+        dueDate: new Date().toISOString().split("T")[0],
+        isTodayPriority: false,
+      });
+      setTasks((current) => [created, ...current.filter((t) => t.id !== created.id)]);
+      setMessages((current) => [
+        ...current,
+        {
+          role: "echo",
+          text: `✓ I've added "${created.title}" to your Tasks list.`,
+          id: `msg-${Date.now()}-action`,
+          timestamp: Date.now(),
+        },
+      ]);
+    } catch (err) {
+      console.error("[App] Failed to add suggested task:", err);
+    }
   }
 
   function startNewChat() {
@@ -214,8 +317,18 @@ function App() {
                 )}
               </button>
             )}
-            <span className="beta-pill">EARLY PREVIEW</span>
-            <div className="avatar" title="Muhammed">M</div>
+            <button
+              type="button"
+              className="avatar-btn"
+              onClick={() => setAuthModalOpen(true)}
+              title={currentUser ? `Connected: ${currentUser.email || "Account"}` : "Connect Account / Sign in"}
+              aria-label="Account Settings"
+            >
+              <div className="avatar">
+                {currentUser ? (currentUser.email?.[0]?.toUpperCase() || "✓") : "M"}
+              </div>
+              <span className={`avatar-status-badge ${currentUser ? "online" : "offline"}`} />
+            </button>
           </div>
         </header>
 
@@ -256,13 +369,62 @@ function App() {
               ) : (
                 <div className="messages">
                   {messages.map((message, index) => (
-                    <div className={`message ${message.role}`} key={index}>
-                      <div className="message-label">
-                        {message.role === "user" ? "YOU" : "ECHO"}
+                    <div
+                      className={`message ${message.role} ${message.isError ? "message-error" : ""}`}
+                      key={message.id || index}
+                    >
+                      <div className="message-label-row">
+                        <span className="message-label">
+                          {message.role === "user" ? "YOU" : "ECHO"}
+                        </span>
+                        {message.detectedLanguage && message.detectedLanguage !== "en" && (
+                          <span className="message-lang-badge" title="Response language">
+                            {message.detectedLanguage === "ml" ? "മലയാളം" : "Manglish"}
+                          </span>
+                        )}
                       </div>
                       <p>{message.text}</p>
+                      {message.canRetry && (
+                        <button
+                          type="button"
+                          className="message-retry-btn"
+                          onClick={() => sendMessage(message.text)}
+                        >
+                          ↻ Try again
+                        </button>
+                      )}
+                      {message.suggestedActions && message.suggestedActions.length > 0 && (
+                        <div className="message-suggestions-chips">
+                          {message.suggestedActions.map((action, i) => (
+                            <button
+                              key={i}
+                              type="button"
+                              className="suggestion-action-chip"
+                              onClick={() => handleExecuteSuggestedAction(action)}
+                              title="Add this suggestion to Tasks"
+                            >
+                              <span className="chip-plus">＋</span>
+                              <span className="chip-text">{action}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ))}
+
+                  {isAiResponding && (
+                    <div className="message echo message-thinking">
+                      <div className="message-label">ECHO</div>
+                      <div className="thinking-row">
+                        <div className="thinking-dots">
+                          <span />
+                          <span />
+                          <span />
+                        </div>
+                        <span className="thinking-text">Echo is reflecting...</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -305,10 +467,10 @@ function App() {
                     <button
                       type="submit"
                       className="send-button"
-                      disabled={!input.trim()}
+                      disabled={!input.trim() || isAiResponding}
                       aria-label="Send message"
                     >
-                      ↑
+                      {isAiResponding ? "⋯" : "↑"}
                     </button>
                   </div>
                 </div>
@@ -322,9 +484,23 @@ function App() {
                 </div>
               )}
 
-              <p className="privacy-note">
-                Built for thoughtful conversations. AI is not connected yet.
-              </p>
+              <div className="privacy-note-row">
+                <span className={`privacy-indicator-dot ${currentUser ? "connected" : ""}`} />
+                <p className="privacy-note">
+                  {currentUser
+                    ? `Connected to Echo AI via Supabase Edge Function (${currentUser.email || "Authenticated"}).`
+                    : "Converse with Echo AI. Sign in for private, authenticated companion guidance."}
+                </p>
+                {!currentUser && (
+                  <button
+                    type="button"
+                    className="privacy-connect-link"
+                    onClick={() => setAuthModalOpen(true)}
+                  >
+                    Connect
+                  </button>
+                )}
+              </div>
             </div>
           </section>
         ) : (
@@ -374,6 +550,9 @@ function App() {
               activePage={activePage}
               isCollapsed={!showCompanion}
               onToggleCollapse={() => setShowCompanion(!showCompanion)}
+              isAiResponding={isAiResponding}
+              onRetryMessage={(txt) => sendMessage(txt)}
+              onExecuteSuggestedAction={handleExecuteSuggestedAction}
             />
           </section>
         )}
@@ -409,6 +588,13 @@ function App() {
           );
         })}
       </nav>
+
+      <AuthModal
+        isOpen={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        currentUser={currentUser}
+        onUserChange={setCurrentUser}
+      />
     </div>
   );
 }

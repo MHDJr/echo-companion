@@ -10,6 +10,9 @@ interface CompanionPanelProps {
   activePage: NavPage;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
+  isAiResponding?: boolean;
+  onRetryMessage?: (text: string) => void;
+  onExecuteSuggestedAction?: (actionText: string) => void;
 }
 
 const pageSuggestions: Record<string, { icon: string; title: string; text: string }[]> = {
@@ -40,6 +43,9 @@ export function CompanionPanel({
   activePage,
   isCollapsed = false,
   onToggleCollapse,
+  isAiResponding = false,
+  onRetryMessage,
+  onExecuteSuggestedAction,
 }: CompanionPanelProps) {
   const suggestions = pageSuggestions[activePage] || [
     { icon: "💡", title: "Ask Echo", text: "Help me find clarity with my current task" },
@@ -119,13 +125,62 @@ export function CompanionPanel({
           <div className="companion-messages-container">
             <div className="messages companion-messages">
               {messages.map((message, index) => (
-                <div className={`message ${message.role}`} key={index}>
-                  <div className="message-label">
-                    {message.role === "user" ? "YOU" : "ECHO"}
+                <div
+                  className={`message ${message.role} ${message.isError ? "message-error" : ""}`}
+                  key={message.id || index}
+                >
+                  <div className="message-label-row">
+                    <span className="message-label">
+                      {message.role === "user" ? "YOU" : "ECHO"}
+                    </span>
+                    {message.detectedLanguage && message.detectedLanguage !== "en" && (
+                      <span className="message-lang-badge" title="Response language">
+                        {message.detectedLanguage === "ml" ? "മലയാളം" : "Manglish"}
+                      </span>
+                    )}
                   </div>
                   <p>{message.text}</p>
+                  {message.canRetry && onRetryMessage && (
+                    <button
+                      type="button"
+                      className="message-retry-btn"
+                      onClick={() => onRetryMessage(message.text)}
+                    >
+                      ↻ Try again
+                    </button>
+                  )}
+                  {message.suggestedActions && message.suggestedActions.length > 0 && (
+                    <div className="message-suggestions-chips">
+                      {message.suggestedActions.map((action, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          className="suggestion-action-chip"
+                          onClick={() => onExecuteSuggestedAction?.(action)}
+                          title="Add this suggestion to Tasks"
+                        >
+                          <span className="chip-plus">＋</span>
+                          <span className="chip-text">{action}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
+
+              {isAiResponding && (
+                <div className="message echo message-thinking">
+                  <div className="message-label">ECHO</div>
+                  <div className="thinking-row">
+                    <div className="thinking-dots">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                    <span className="thinking-text">Echo is reflecting...</span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
