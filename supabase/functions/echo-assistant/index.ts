@@ -232,8 +232,8 @@ Deno.serve(async (req: Request) => {
   });
 
   // 9. Call Gemini API
-  // Using gemini-2.5-flash as primary, falling back to gemini-2.0-flash if needed
-  const modelsToTry = ["gemini-2.5-flash", "gemini-2.0-flash"];
+  // Using current active model gemini-3.8-flash as primary
+  const modelsToTry = ["gemini-3.8-flash", "gemini-3.8-pro", "gemini-2.5-flash"];
   let geminiResponseData: any = null;
   let lastApiStatus = 0;
 
@@ -269,13 +269,67 @@ Deno.serve(async (req: Request) => {
       } else {
         const errorText = await response.text();
         console.warn(`[echo-assistant] Model ${model} returned HTTP ${response.status}:`, errorText.slice(0, 200));
-        // If 404 (model not found), try the next model
-        if (response.status !== 404 && response.status !== 503) {
+        if (response.status === 503) {
+          // Wait briefly on 503 before trying next
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        } else if (response.status !== 404) {
           break;
         }
       }
     } catch (fetchErr) {
       console.warn(`[echo-assistant] Network error calling ${model}:`, fetchErr);
+    }
+  }
+
+  // If initial models failed, dynamically query available models from Gemini API
+  if (!geminiResponseData) {
+    try {
+      const listRes = await fetch("https://generativelanguage.googleapis.com/v1beta/models", {
+        headers: { "x-goog-api-key": geminiApiKey },
+      });
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        const availableModels: string[] = (listData.models || [])
+          .filter((m: any) => m.supportedGenerationMethods?.includes("generateContent"))
+          .map((m: any) => (m.name || "").replace("models/", ""))
+          .filter(Boolean);
+
+        console.log("[echo-assistant] Available models for this key:", availableModels.slice(0, 10));
+
+        for (const candidateModel of availableModels) {
+          if (modelsToTry.includes(candidateModel)) continue;
+          try {
+            const dynamicRes = await fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-goog-api-key": geminiApiKey,
+                },
+                body: JSON.stringify({
+                  systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+                  contents,
+                  generationConfig: {
+                    temperature: 0.7,
+                    maxOutputTokens: 1024,
+                    responseMimeType: "application/json",
+                  },
+                }),
+              }
+            );
+            if (dynamicRes.ok) {
+              geminiResponseData = await dynamicRes.json();
+              console.log(`[echo-assistant] Successfully responded using dynamic model: ${candidateModel}`);
+              break;
+            }
+          } catch (_e) {
+            // continue trying
+          }
+        }
+      }
+    } catch (discoveryErr) {
+      console.warn("[echo-assistant] Error in dynamic model discovery:", discoveryErr);
     }
   }
 
@@ -296,8 +350,10 @@ Deno.serve(async (req: Request) => {
 
   // 10. Parse and Format Structured Response
   try {
-    const rawCandidateText =
-      geminiResponseData?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const candidateParts = geminiResponseData?.candidates?.[0]?.content?.parts || [];
+    // If thinking mode is on, filter out parts with thought: true
+    const answerPart = candidateParts.find((p: any) => !p.thought) || candidateParts[candidateParts.length - 1];
+    const rawCandidateText = answerPart?.text;
 
     if (!rawCandidateText) {
       return new Response(
@@ -310,16 +366,39 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    let structured: { reply: string; detectedLanguage?: string; suggestedActions?: string[] };
+    let structured: { reply?: string; detectedLanguage?: string; suggestedActions?: string[] } | null = null;
+    
+    // 1. Try direct parse
     try {
       structured = JSON.parse(rawCandidateText);
-    } catch (_parseErr) {
-      // Fallback if model returned plain markdown text instead of strict JSON
-      structured = {
-        reply: rawCandidateText.trim(),
-        detectedLanguage: "en",
-        suggestedActions: [],
-      };
+    } catch {
+      // 2. Try markdown json fence
+      const fenceMatch = rawCandidateText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+      if (fenceMatch && fenceMatch[1]) {
+        try {
+          structured = JSON.parse(fenceMatch[1].trim());
+        } catch {}
+      }
+
+      // 3. Try outermost curly braces
+      if (!structured) {
+        const firstBrace = rawCandidateText.indexOf("{");
+        const lastBrace = rawCandidateText.lastIndexOf("}");
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          try {
+            structured = JSON.parse(rawCandidateText.slice(firstBrace, lastBrace + 1));
+          } catch {}
+        }
+      }
+
+      // 4. Fallback if model returned plain conversational text
+      if (!structured || typeof structured.reply !== "string") {
+        structured = {
+          reply: rawCandidateText.trim(),
+          detectedLanguage: "en",
+          suggestedActions: [],
+        };
+      }
     }
 
     return new Response(
