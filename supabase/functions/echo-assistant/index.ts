@@ -271,7 +271,7 @@ function validateAndSanitizeActionDraft(
 }
 
 // In-memory model cache for zero-overhead candidate selection across invocations
-let cachedWorkingModel = "gemini-3-flash-preview";
+let cachedWorkingModel = "gemini-flash-lite-latest";
 
 Deno.serve(async (req: Request) => {
   const edgeStart = performance.now();
@@ -438,7 +438,11 @@ Deno.serve(async (req: Request) => {
     Boolean(req.headers.get("accept")?.includes("text/event-stream"));
 
   // 9. Call Gemini API with Latency Optimization
-  const staticCandidates = ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-flash-latest"];
+  const staticCandidates = [
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite-preview",
+    "gemma-4-26b-a4b-it",
+  ];
   const modelsToTry = [
     cachedWorkingModel,
     ...staticCandidates.filter((m) => m !== cachedWorkingModel),
@@ -448,6 +452,7 @@ Deno.serve(async (req: Request) => {
   let lastApiStatus = 0;
   let successfulModel = "";
   let geminiDurationMs = 0;
+  const triedCandidates: Array<{ model: string; status: number; durationMs: number; error?: string }> = [];
 
   for (const model of modelsToTry) {
     const geminiStart = performance.now();
@@ -456,10 +461,9 @@ Deno.serve(async (req: Request) => {
         temperature: 0.5,
         maxOutputTokens: 700,
         responseMimeType: "application/json",
-        thinkingConfig: { thinkingBudget: 0 },
       };
 
-      let response = await fetch(
+      const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
         {
           method: "POST",
@@ -474,35 +478,9 @@ Deno.serve(async (req: Request) => {
             contents,
             generationConfig,
           }),
-          signal: AbortSignal.timeout(8000),
+          signal: AbortSignal.timeout(4000),
         }
       );
-
-      // Fallback: If 400 occurs due to thinkingConfig, retry without it
-      if (response.status === 400) {
-        response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-goog-api-key": geminiApiKey,
-            },
-            body: JSON.stringify({
-              systemInstruction: {
-                parts: [{ text: dynamicSystemPrompt }],
-              },
-              contents,
-              generationConfig: {
-                temperature: 0.5,
-                maxOutputTokens: 700,
-                responseMimeType: "application/json",
-              },
-            }),
-            signal: AbortSignal.timeout(8000),
-          }
-        );
-      }
 
       geminiDurationMs = performance.now() - geminiStart;
       lastApiStatus = response.status;
@@ -511,37 +489,65 @@ Deno.serve(async (req: Request) => {
         geminiResponseData = await response.json();
         successfulModel = model;
         cachedWorkingModel = model;
+        triedCandidates.push({ model, status: response.status, durationMs: Math.round(geminiDurationMs) });
         break;
       } else {
         const errorText = await response.text();
+        triedCandidates.push({
+          model,
+          status: response.status,
+          durationMs: Math.round(geminiDurationMs),
+          error: errorText.slice(0, 100),
+        });
         console.warn(
           `[echo-assistant] Model ${model} returned HTTP ${response.status} in ${geminiDurationMs.toFixed(0)}ms:`,
           errorText.slice(0, 120)
         );
       }
     } catch (fetchErr: any) {
+      triedCandidates.push({
+        model,
+        status: 0,
+        durationMs: Math.round(performance.now() - geminiStart),
+        error: fetchErr.message,
+      });
       console.warn(`[echo-assistant] ${model} error:`, fetchErr.message);
     }
   }
 
   // Dynamic discovery fallback if static candidates fail
   if (!geminiResponseData) {
+    const deadModels = new Set([
+      "gemini-2.0-flash",
+      "gemini-1.5-flash",
+      "gemini-flash-latest",
+      "gemini-2.5-flash",
+      "gemini-2.5-pro",
+      "gemini-2.5-flash-preview-tts",
+      "gemini-2.5-pro-preview-tts",
+      "gemini-pro-latest",
+      "gemini-2.5-flash-lite",
+      "gemini-2.5-flash-image",
+      "gemini-3-flash-preview",
+      "gemini-3.1-pro-preview",
+      "gemini-3.1-pro-preview-customtools",
+      "gemma-4-31b-it",
+    ]);
     try {
       const listRes = await fetch("https://generativelanguage.googleapis.com/v1beta/models", {
         headers: { "x-goog-api-key": geminiApiKey },
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(4000),
       });
       if (listRes.ok) {
         const listData = await listRes.json();
         const availableModels: string[] = (listData.models || [])
           .filter((m: any) => m.supportedGenerationMethods?.includes("generateContent"))
           .map((m: any) => (m.name || "").replace("models/", ""))
-          .filter(Boolean);
+          .filter((m: string) => Boolean(m) && !deadModels.has(m) && !modelsToTry.includes(m));
 
         for (const candidateModel of availableModels) {
-          if (modelsToTry.includes(candidateModel)) continue;
+          const dynamicStart = performance.now();
           try {
-            const dynamicStart = performance.now();
             const dynamicRes = await fetch(
               `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent`,
               {
@@ -557,21 +563,25 @@ Deno.serve(async (req: Request) => {
                     temperature: 0.5,
                     maxOutputTokens: 700,
                     responseMimeType: "application/json",
-                    thinkingConfig: { thinkingBudget: 0 },
                   },
                 }),
-                signal: AbortSignal.timeout(8000),
+                signal: AbortSignal.timeout(4000),
               }
             );
+            const dDur = performance.now() - dynamicStart;
             if (dynamicRes.ok) {
               geminiResponseData = await dynamicRes.json();
               successfulModel = candidateModel;
               cachedWorkingModel = candidateModel;
-              geminiDurationMs = performance.now() - dynamicStart;
+              geminiDurationMs = dDur;
+              triedCandidates.push({ model: candidateModel, status: dynamicRes.status, durationMs: Math.round(dDur) });
               break;
+            } else {
+              const errTxt = await dynamicRes.text();
+              triedCandidates.push({ model: candidateModel, status: dynamicRes.status, durationMs: Math.round(dDur), error: errTxt.slice(0, 100) });
             }
-          } catch (_e) {
-            // continue trying
+          } catch (dynErr: any) {
+            triedCandidates.push({ model: candidateModel, status: 0, durationMs: Math.round(performance.now() - dynamicStart), error: dynErr.message });
           }
         }
       }
@@ -671,6 +681,8 @@ Deno.serve(async (req: Request) => {
       authMs: Math.round(authDurationMs),
       geminiMs: Math.round(geminiDurationMs),
       edgeMs: Math.round(totalEdgeDurationMs),
+      model: successfulModel,
+      triedCandidates,
     },
   };
 
