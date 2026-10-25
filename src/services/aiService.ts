@@ -1,10 +1,11 @@
 import { getCurrentSession } from "./supabaseClient";
-import type { Message } from "../types";
+import type { Message, ActionDraft } from "../types";
 
 export interface AiAssistantResponse {
   reply: string;
   detectedLanguage?: string;
   suggestedActions?: string[];
+  actionDraft?: ActionDraft | null;
 }
 
 export class AiServiceError extends Error {
@@ -26,12 +27,42 @@ export class AiServiceError extends Error {
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "https://mewxhhifntjkedgptxqi.supabase.co";
 const FUNCTION_URL = `${supabaseUrl}/functions/v1/echo-assistant`;
 
+export interface ChatContextOptions {
+  activePage?: string;
+  history?: Message[];
+  calendarEvents?: Array<{ id: string; title: string; date: string; time: string }>;
+  tasks?: Array<{ id: string; title: string; dueDate?: string; completed?: boolean }>;
+}
+
+function buildClientPayloadContext(context?: ChatContextOptions) {
+  const now = new Date();
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata";
+  const localDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const localTime = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+
+  const historyPayload = context?.history
+    ?.filter((m) => !m.isError)
+    ?.slice(-6)
+    ?.map((m) => ({
+      role: m.role,
+      text: m.text,
+    }));
+
+  return {
+    activePage: context?.activePage,
+    history: historyPayload,
+    timeZone,
+    currentDateTime: now.toISOString(),
+    localDate,
+    localTime,
+    calendarEvents: context?.calendarEvents?.slice(0, 10),
+    tasks: context?.tasks?.slice(0, 10),
+  };
+}
+
 export async function sendChatMessage(
   message: string,
-  context?: {
-    activePage?: string;
-    history?: Message[];
-  }
+  context?: ChatContextOptions
 ): Promise<AiAssistantResponse> {
   const trimmed = message.trim();
   if (!trimmed) {
@@ -48,20 +79,9 @@ export async function sendChatMessage(
   }
 
   // 2. Prepare payload
-  const historyPayload = context?.history
-    ?.filter((m) => !m.isError)
-    ?.slice(-6)
-    ?.map((m) => ({
-      role: m.role,
-      text: m.text,
-    }));
-
   const payload = {
     message: trimmed,
-    context: {
-      activePage: context?.activePage,
-      history: historyPayload,
-    },
+    context: buildClientPayloadContext(context),
   };
 
   // 3. Make authenticated request with timing instrumentation
@@ -86,7 +106,6 @@ export async function sendChatMessage(
     const data = await response.json().catch(() => null);
 
     if (response.ok && data) {
-      // Safe telemetry log: timings only, no prompt or credential
       const serverTiming = response.headers.get("Server-Timing");
       console.log(
         `[Echo AI Timing] Total: ${reqDuration.toFixed(0)}ms | Edge: ${data.metrics?.edgeMs || "?"}ms | Model: ${data.metrics?.geminiMs || "?"}ms | Auth: ${data.metrics?.authMs || "?"}ms | Server-Timing: ${serverTiming || "n/a"}`
@@ -96,6 +115,7 @@ export async function sendChatMessage(
         reply: typeof data.reply === "string" ? data.reply : "I am here.",
         detectedLanguage: data.detectedLanguage,
         suggestedActions: Array.isArray(data.suggestedActions) ? data.suggestedActions : [],
+        actionDraft: data.actionDraft || null,
       };
     }
 
@@ -142,22 +162,22 @@ export async function sendChatMessage(
     }
 
     throw new AiServiceError(
-      "Network connection issue reaching Echo assistant. Please check your connection.",
+      "Unable to connect to Echo Companion. Please check your network connection.",
       "NETWORK_ERROR"
     );
   }
 }
 
+/**
+ * Fast streaming implementation utilizing Edge Server-Sent Events (SSE)
+ */
 export async function streamChatMessage(
   message: string,
+  context?: ChatContextOptions,
   callbacks: {
     onDelta?: (deltaText: string) => void;
-    onComplete?: (response: AiAssistantResponse) => void;
-  },
-  context?: {
-    activePage?: string;
-    history?: Message[];
-  }
+    onComplete?: (finalResponse: AiAssistantResponse) => void;
+  } = {}
 ): Promise<AiAssistantResponse> {
   const trimmed = message.trim();
   if (!trimmed) {
@@ -172,21 +192,10 @@ export async function streamChatMessage(
     );
   }
 
-  const historyPayload = context?.history
-    ?.filter((m) => !m.isError)
-    ?.slice(-4)
-    ?.map((m) => ({
-      role: m.role,
-      text: m.text,
-    }));
-
   const payload = {
     message: trimmed,
     stream: true,
-    context: {
-      activePage: context?.activePage,
-      history: historyPayload,
-    },
+    context: buildClientPayloadContext(context),
   };
 
   const controller = new AbortController();
@@ -218,9 +227,8 @@ export async function streamChatMessage(
       throw new AiServiceError("Echo AI service unavailable. Please try again.", "SERVICE_UNAVAILABLE");
     }
 
-    // Process SSE stream
     if (!response.body) {
-      return sendChatMessage(message, context); // fallback to standard call
+      return sendChatMessage(message, context);
     }
 
     const reader = response.body.getReader();
@@ -229,6 +237,7 @@ export async function streamChatMessage(
       reply: "",
       detectedLanguage: "en",
       suggestedActions: [],
+      actionDraft: null,
     };
 
     let buffer = "";
@@ -253,10 +262,11 @@ export async function streamChatMessage(
                 reply: parsed.reply,
                 detectedLanguage: parsed.detectedLanguage || "en",
                 suggestedActions: Array.isArray(parsed.suggestedActions) ? parsed.suggestedActions : [],
+                actionDraft: parsed.actionDraft || null,
               };
             }
           } catch {
-            // ignore non-json keepalives
+            // ignore
           }
         }
       }
@@ -268,8 +278,6 @@ export async function streamChatMessage(
   } catch (err: unknown) {
     clearTimeout(timeoutId);
     if (err instanceof AiServiceError) throw err;
-    // Fall back smoothly to non-streaming if stream read encounters transport issues
     return sendChatMessage(message, context);
   }
 }
-

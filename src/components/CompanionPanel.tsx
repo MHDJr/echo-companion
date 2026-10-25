@@ -1,5 +1,6 @@
 import { useRef, useEffect } from "react";
-import type { Message, NavPage } from "../types";
+import type { Message, NavPage, ActionDraft } from "../types";
+import { ActionDraftCard } from "./ActionDraftCard";
 
 interface CompanionPanelProps {
   messages: Message[];
@@ -14,6 +15,11 @@ interface CompanionPanelProps {
   isAiResponding?: boolean;
   onRetryMessage?: (text: string) => void;
   onExecuteSuggestedAction?: (actionText: string) => void;
+  onConfirmActionDraft?: (draft: ActionDraft) => Promise<void>;
+  onEditActionDraft?: (draft: ActionDraft) => void;
+  onCancelActionDraft?: (draft: ActionDraft) => void;
+  onSelectReminder?: (draft: ActionDraft, minutes: number | null) => Promise<void>;
+  executingDraftIds?: Set<string>;
 }
 
 const pageSuggestions: Record<string, { icon: string; title: string; text: string }[]> = {
@@ -47,6 +53,11 @@ export function CompanionPanel({
   isAiResponding = false,
   onRetryMessage,
   onExecuteSuggestedAction,
+  onConfirmActionDraft,
+  onEditActionDraft,
+  onCancelActionDraft,
+  onSelectReminder,
+  executingDraftIds,
 }: CompanionPanelProps) {
   const suggestions = pageSuggestions[activePage] || [
     { icon: "💡", title: "Ask Echo", text: "Help me find clarity with my current task" },
@@ -159,6 +170,17 @@ export function CompanionPanel({
                       ↻ Try again
                     </button>
                   )}
+                  {message.actionDraft && onConfirmActionDraft && onEditActionDraft && onCancelActionDraft && (
+                    <ActionDraftCard
+                      draft={message.actionDraft}
+                      isExecuting={executingDraftIds?.has(message.actionDraft.id)}
+                      onConfirm={onConfirmActionDraft}
+                      onEdit={onEditActionDraft}
+                      onCancel={onCancelActionDraft}
+                      onSelectReminder={onSelectReminder}
+                    />
+                  )}
+
                   {message.suggestedActions && message.suggestedActions.length > 0 && (
                     <div className="message-suggestions-chips">
                       {message.suggestedActions.map((action, i) => (
@@ -166,10 +188,16 @@ export function CompanionPanel({
                           key={i}
                           type="button"
                           className="suggestion-action-chip"
-                          onClick={() => onExecuteSuggestedAction?.(action)}
-                          title="Add this suggestion to Tasks"
+                          onClick={() => {
+                            if (onExecuteSuggestedAction) {
+                              onExecuteSuggestedAction(action);
+                            } else {
+                              sendMessage(action);
+                            }
+                          }}
+                          title="Ask Echo about this"
                         >
-                          <span className="chip-plus">＋</span>
+                          <span className="chip-plus">›</span>
                           <span className="chip-text">{action}</span>
                         </button>
                       ))}

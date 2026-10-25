@@ -62,15 +62,6 @@ export function MyDayView({
 
       <div className="overview-grid">
         <div className="overview-card">
-          <div className="overview-icon">⏱</div>
-          <div className="overview-data">
-            <span className="overview-value">3h 45m</span>
-            <span className="overview-label">Deep focus blocks</span>
-          </div>
-          <div className="overview-detail">2 scheduled focus sessions</div>
-        </div>
-
-        <div className="overview-card">
           <div className="overview-icon">✓</div>
           <div className="overview-data">
             <span className="overview-value">

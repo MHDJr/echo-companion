@@ -100,6 +100,12 @@ function formatGoogleEvent(gEvent: any) {
     description: gEvent.description || "",
     isDemo: false,
     source: "google" as const,
+    reminders: gEvent.reminders
+      ? {
+          useDefault: Boolean(gEvent.reminders.useDefault),
+          overrides: Array.isArray(gEvent.reminders.overrides) ? gEvent.reminders.overrides : [],
+        }
+      : null,
   };
 }
 
@@ -497,19 +503,24 @@ Deno.serve(async (req: Request) => {
           }
         }
 
+        const createPayload: Record<string, any> = {
+          summary: title,
+          location,
+          description,
+          start: startObj,
+          end: endObj,
+        };
+        if (body.reminders !== undefined) {
+          createPayload.reminders = body.reminders;
+        }
+
         const createRes = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
           method: "POST",
           headers: {
             Authorization: `Bearer ${googleToken}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            summary: title,
-            location,
-            description,
-            start: startObj,
-            end: endObj,
-          }),
+          body: JSON.stringify(createPayload),
         });
 
         if (!createRes.ok) {
@@ -541,6 +552,7 @@ Deno.serve(async (req: Request) => {
         if (body.title !== undefined) patchPayload.summary = body.title;
         if (body.location !== undefined) patchPayload.location = body.location;
         if (body.description !== undefined) patchPayload.description = body.description;
+        if (body.reminders !== undefined) patchPayload.reminders = body.reminders;
 
         if (body.date) {
           patchPayload.start = { date: body.date };

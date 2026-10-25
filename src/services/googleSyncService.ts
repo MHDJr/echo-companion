@@ -269,6 +269,48 @@ export async function updateGoogleCalendarEvent(
 }
 
 /**
+ * Update reminder configuration for a Google Calendar event.
+ * minutes = null removes custom reminders (overrides: []).
+ * minutes = number sets a popup reminder N minutes before the event.
+ */
+export async function updateCalendarEventReminders(
+  googleEventId: string,
+  minutes: number | null
+): Promise<CalendarEvent> {
+  const session = await getCurrentSession();
+  if (!session || !session.access_token) {
+    throw new Error("You must be signed in to configure Google Calendar reminders.");
+  }
+
+  const cleanId = googleEventId.replace(/^google-/, "");
+  const remindersPayload = {
+    useDefault: false,
+    overrides: minutes !== null && minutes >= 0
+      ? [{ method: "popup", minutes }]
+      : [],
+  };
+
+  const { data, error } = await supabase.functions.invoke(
+    `${EDGE_FUNCTION_NAME}/calendar/events/${encodeURIComponent(cleanId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: {
+        reminders: remindersPayload,
+      },
+    }
+  );
+
+  if (error || !data?.event) {
+    throw new Error(error?.message || "Failed to update reminder settings on Google Calendar.");
+  }
+
+  return data.event;
+}
+
+/**
  * Delete an event from Google Calendar.
  */
 export async function deleteGoogleCalendarEvent(googleEventId: string): Promise<void> {

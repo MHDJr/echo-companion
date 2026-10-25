@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { User } from "@supabase/supabase-js";
 import "./App.css";
-import type { CalendarEvent, Message, NavPage, TaskItem, GoogleSyncStatus } from "./types";
+import type { CalendarEvent, Message, NavPage, TaskItem, GoogleSyncStatus, ActionDraft } from "./types";
 import { initialCalendarEvents, initialTasks } from "./data/mockData";
 import { taskService } from "./services/taskService";
 import { getCurrentSession, supabase } from "./services/supabaseClient";
@@ -14,12 +14,14 @@ import {
   createGoogleCalendarEvent,
   updateGoogleCalendarEvent,
   deleteGoogleCalendarEvent,
+  updateCalendarEventReminders,
   connectGoogleWorkspaceOAuth,
 } from "./services/googleSyncService";
 import { MyDayView } from "./components/MyDayView";
 import { CalendarView } from "./components/CalendarView";
 import { TasksView } from "./components/TasksView";
 import { CompanionPanel } from "./components/CompanionPanel";
+import { ActionDraftCard } from "./components/ActionDraftCard";
 import { AuthModal } from "./components/AuthModal";
 import { GoogleConnectPrompt } from "./components/GoogleConnectPrompt";
 import { GoogleSyncBadge } from "./components/GoogleSyncBadge";
@@ -81,6 +83,7 @@ function App() {
   });
 
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>(initialCalendarEvents);
+  const [executingDraftIds, setExecutingDraftIds] = useState<Set<string>>(new Set());
 
   // Sync tasks on mount through the TaskService interface
   useEffect(() => {
@@ -241,6 +244,18 @@ function App() {
       const response = await sendChatMessage(message, {
         activePage,
         history: messages,
+        calendarEvents: calendarEvents.map((e) => ({
+          id: e.googleEventId || e.id,
+          title: e.title,
+          date: e.date,
+          time: e.time,
+        })),
+        tasks: tasks.map((t) => ({
+          id: t.googleTaskId || t.id,
+          title: t.title,
+          dueDate: t.dueDate,
+          completed: t.completed,
+        })),
       });
 
       setMessages((current) => [
@@ -252,6 +267,7 @@ function App() {
           timestamp: Date.now(),
           detectedLanguage: response.detectedLanguage,
           suggestedActions: response.suggestedActions,
+          actionDraft: response.actionDraft || null,
         },
       ]);
     } catch (err: unknown) {
@@ -276,28 +292,180 @@ function App() {
     }
   }
 
-  async function handleExecuteSuggestedAction(actionText: string) {
+  // Conversational chip: send prompt to Echo to converse naturally (never derives title from button text)
+  function handleExecuteSuggestedAction(actionPrompt: string) {
+    sendMessage(actionPrompt);
+  }
+
+  // Execute original validated proposal (Objective C & D)
+  async function handleConfirmActionDraft(draft: ActionDraft) {
+    if (executingDraftIds.has(draft.id) || draft.status === "completed" || draft.status === "cancelled") {
+      return;
+    }
+
+    setExecutingDraftIds((prev) => new Set(prev).add(draft.id));
+
     try {
-      const created = await taskService.createTask({
-        title: actionText,
-        completed: false,
-        category: "Work",
-        priority: "Medium",
-        dueDate: new Date().toISOString().split("T")[0],
-        isTodayPriority: false,
+      let createdResourceId: string | undefined = undefined;
+
+      if (draft.type === "create_event") {
+        let createdEvent: CalendarEvent | undefined = undefined;
+        if (googleSyncStatus.isConnected) {
+          createdEvent = await createGoogleCalendarEvent({
+            title: draft.title,
+            date: draft.date || new Date().toISOString().split("T")[0],
+            time: draft.startTime && draft.endTime
+              ? `${draft.startTime} - ${draft.endTime}`
+              : draft.startTime || "All day",
+            category: "Meeting",
+            description: draft.description || "",
+            isDemo: false,
+            source: "google",
+          });
+          setCalendarEvents((current) => [createdEvent!, ...current.filter((e) => e.id !== createdEvent!.id)]);
+        } else {
+          createdEvent = {
+            id: `cal-${Date.now()}`,
+            title: draft.title,
+            date: draft.date || new Date().toISOString().split("T")[0],
+            time: draft.startTime && draft.endTime
+              ? `${draft.startTime} - ${draft.endTime}`
+              : draft.startTime || "All day",
+            category: "Meeting",
+            description: draft.description || "",
+            isDemo: false,
+            source: "local",
+          };
+          setCalendarEvents((current) => [...current, createdEvent!]);
+        }
+        createdResourceId = createdEvent?.googleEventId || createdEvent?.id;
+      } else if (draft.type === "create_task") {
+        const createdTask = await taskService.createTask({
+          title: draft.title,
+          completed: false,
+          category: "Work",
+          priority: "Medium",
+          dueDate: draft.dueDate || "Today",
+          notes: draft.description || "",
+          isTodayPriority: draft.dueDate === "Today" || draft.dueDate === new Date().toISOString().split("T")[0],
+        });
+        setTasks((current) => [createdTask, ...current.filter((t) => t.id !== createdTask.id)]);
+        createdResourceId = createdTask.googleTaskId || createdTask.id;
+      } else if (draft.type === "complete_task" && draft.targetResourceId) {
+        const updated = await taskService.toggleTask(draft.targetResourceId);
+        setTasks((current) => current.map((t) => (t.id === draft.targetResourceId ? updated : t)));
+      } else if (draft.type === "delete_task" && draft.targetResourceId) {
+        await taskService.deleteTask(draft.targetResourceId);
+        setTasks((current) => current.filter((t) => t.id !== draft.targetResourceId));
+      } else if (draft.type === "delete_event" && draft.targetResourceId) {
+        await handleDeleteCalendarEvent(draft.targetResourceId);
+      } else if (draft.type === "update_event" && draft.targetResourceId) {
+        await handleEditCalendarEvent(draft.targetResourceId, {
+          title: draft.title,
+          date: draft.date,
+          time: draft.startTime && draft.endTime ? `${draft.startTime} - ${draft.endTime}` : draft.startTime,
+          description: draft.description,
+        });
+      } else if (draft.type === "update_task" && draft.targetResourceId) {
+        const updated = await taskService.updateTask(draft.targetResourceId, {
+          title: draft.title,
+          dueDate: draft.dueDate,
+          notes: draft.description,
+        });
+        setTasks((current) => current.map((t) => (t.id === draft.targetResourceId ? updated : t)));
+      }
+
+      setMessages((current) =>
+        current.map((m) =>
+          m.actionDraft?.id === draft.id
+            ? {
+                ...m,
+                actionDraft: {
+                  ...m.actionDraft,
+                  status: "completed",
+                  createdResourceId,
+                  executionError: undefined,
+                },
+              }
+            : m
+        )
+      );
+    } catch (err: any) {
+      console.error("[App] Action execution error:", err);
+      setMessages((current) =>
+        current.map((m) =>
+          m.actionDraft?.id === draft.id
+            ? {
+                ...m,
+                actionDraft: {
+                  ...m.actionDraft,
+                  status: "failed",
+                  executionError: err?.message || "Execution failed. Please verify your connection.",
+                },
+              }
+            : m
+        )
+      );
+    } finally {
+      setExecutingDraftIds((prev) => {
+        const next = new Set(prev);
+        next.delete(draft.id);
+        return next;
       });
-      setTasks((current) => [created, ...current.filter((t) => t.id !== created.id)]);
-      setMessages((current) => [
-        ...current,
-        {
-          role: "echo",
-          text: `✓ I've added "${created.title}" to your Tasks list.`,
-          id: `msg-${Date.now()}-action`,
-          timestamp: Date.now(),
-        },
-      ]);
+    }
+  }
+
+  function handleEditActionDraft(updatedDraft: ActionDraft) {
+    setMessages((current) =>
+      current.map((m) =>
+        m.actionDraft?.id === updatedDraft.id
+          ? { ...m, actionDraft: updatedDraft }
+          : m
+      )
+    );
+  }
+
+  function handleCancelActionDraft(draft: ActionDraft) {
+    setMessages((current) =>
+      current.map((m) =>
+        m.actionDraft?.id === draft.id
+          ? {
+              ...m,
+              actionDraft: {
+                ...m.actionDraft,
+                status: "cancelled",
+              },
+            }
+          : m
+      )
+    );
+  }
+
+  async function handleSelectReminder(draft: ActionDraft, minutes: number | null) {
+    const googleEventId = draft.createdResourceId;
+    if (!googleEventId) return;
+
+    try {
+      const updated = await updateCalendarEventReminders(googleEventId, minutes);
+      setCalendarEvents((current) =>
+        current.map((e) => (e.googleEventId === googleEventId || e.id === googleEventId ? updated : e))
+      );
+      setMessages((current) =>
+        current.map((m) =>
+          m.actionDraft?.id === draft.id
+            ? {
+                ...m,
+                actionDraft: {
+                  ...m.actionDraft,
+                  selectedReminderMinutes: minutes,
+                  reminderConfirmed: true,
+                },
+              }
+            : m
+        )
+      );
     } catch (err) {
-      console.error("[App] Failed to add suggested task:", err);
+      console.error("[App] Failed to update calendar event reminders:", err);
     }
   }
 
@@ -610,6 +778,17 @@ function App() {
                           ↻ Try again
                         </button>
                       )}
+                      {message.actionDraft && (
+                        <ActionDraftCard
+                          draft={message.actionDraft}
+                          isExecuting={executingDraftIds.has(message.actionDraft.id)}
+                          onConfirm={handleConfirmActionDraft}
+                          onEdit={handleEditActionDraft}
+                          onCancel={handleCancelActionDraft}
+                          onSelectReminder={handleSelectReminder}
+                        />
+                      )}
+
                       {message.suggestedActions && message.suggestedActions.length > 0 && (
                         <div className="message-suggestions-chips">
                           {message.suggestedActions.map((action, i) => (
@@ -618,9 +797,9 @@ function App() {
                               type="button"
                               className="suggestion-action-chip"
                               onClick={() => handleExecuteSuggestedAction(action)}
-                              title="Add this suggestion to Tasks"
+                              title="Ask Echo about this"
                             >
-                              <span className="chip-plus">＋</span>
+                              <span className="chip-plus">›</span>
                               <span className="chip-text">{action}</span>
                             </button>
                           ))}
@@ -802,6 +981,11 @@ function App() {
               isAiResponding={isAiResponding}
               onRetryMessage={(txt) => sendMessage(txt)}
               onExecuteSuggestedAction={handleExecuteSuggestedAction}
+              onConfirmActionDraft={handleConfirmActionDraft}
+              onEditActionDraft={handleEditActionDraft}
+              onCancelActionDraft={handleCancelActionDraft}
+              onSelectReminder={handleSelectReminder}
+              executingDraftIds={executingDraftIds}
             />
           </section>
         )}
