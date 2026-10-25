@@ -304,19 +304,33 @@ function App() {
     }
 
     setExecutingDraftIds((prev) => new Set(prev).add(draft.id));
+    // Clear any prior failure notice while retrying
+    setMessages((current) =>
+      current.map((m) =>
+        m.actionDraft?.id === draft.id
+          ? { ...m, actionDraft: { ...m.actionDraft, executionError: undefined } }
+          : m
+      )
+    );
 
     try {
       let createdResourceId: string | undefined = undefined;
 
       if (draft.type === "create_event") {
         let createdEvent: CalendarEvent | undefined = undefined;
+        const userTz = draft.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata";
+        const eventTime = draft.startTime && draft.endTime
+          ? `${draft.startTime} - ${draft.endTime}`
+          : draft.startTime || "All day";
+
         if (googleSyncStatus.isConnected) {
           createdEvent = await createGoogleCalendarEvent({
             title: draft.title,
             date: draft.date || new Date().toISOString().split("T")[0],
-            time: draft.startTime && draft.endTime
-              ? `${draft.startTime} - ${draft.endTime}`
-              : draft.startTime || "All day",
+            time: eventTime,
+            startTime: draft.startTime,
+            endTime: draft.endTime,
+            timeZone: userTz,
             category: "Meeting",
             description: draft.description || "",
             isDemo: false,
@@ -328,9 +342,10 @@ function App() {
             id: `cal-${Date.now()}`,
             title: draft.title,
             date: draft.date || new Date().toISOString().split("T")[0],
-            time: draft.startTime && draft.endTime
-              ? `${draft.startTime} - ${draft.endTime}`
-              : draft.startTime || "All day",
+            time: eventTime,
+            startTime: draft.startTime,
+            endTime: draft.endTime,
+            timeZone: userTz,
             category: "Meeting",
             description: draft.description || "",
             isDemo: false,
@@ -419,7 +434,14 @@ function App() {
     setMessages((current) =>
       current.map((m) =>
         m.actionDraft?.id === updatedDraft.id
-          ? { ...m, actionDraft: updatedDraft }
+          ? {
+              ...m,
+              actionDraft: {
+                ...updatedDraft,
+                status: "pending",
+                executionError: undefined,
+              },
+            }
           : m
       )
     );

@@ -49,6 +49,65 @@ async function decryptToken(cipherHex: string, secret: string): Promise<string> 
   return new TextDecoder().decode(decrypted);
 }
 
+// Parse 12-hour or 24-hour time string into "HH:MM:SS" (24h)
+function parseTimeTo24h(tStr?: string | null): string | null {
+  if (!tStr) return null;
+  const trimmed = tStr.trim();
+  // 12-hour format e.g. "02:00 PM", "2:00 PM", "2 PM", "02:00:00 PM", "2pm"
+  const match12 = trimmed.match(/^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (match12) {
+    let h = parseInt(match12[1], 10);
+    const m = match12[2] ? parseInt(match12[2], 10) : 0;
+    const s = match12[3] ? parseInt(match12[3], 10) : 0;
+    const isPM = match12[4].toUpperCase() === "PM";
+    if (isPM && h < 12) h += 12;
+    if (!isPM && h === 12) h = 0;
+    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  }
+  // 24-hour format e.g. "14:00", "14:00:00"
+  const match24 = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (match24) {
+    const h = parseInt(match24[1], 10);
+    const m = parseInt(match24[2], 10);
+    const s = match24[3] ? parseInt(match24[3], 10) : 0;
+    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  }
+  return null;
+}
+
+// Convert date, 24h time and timezone into RFC3339 string with timezone offset
+function getRfc3339WithOffset(dateStr: string, time24h: string, tz?: string): { dateTime: string; timeZone: string } {
+  let targetTz = (tz && tz.trim()) ? tz.trim() : "Asia/Kolkata";
+  if (targetTz === "Asia/Calcutta") targetTz = "Asia/Kolkata";
+
+  let offset = "+05:30";
+  try {
+    const dummyDate = new Date(`${dateStr}T12:00:00Z`);
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: targetTz,
+      timeZoneName: "longOffset",
+    }).formatToParts(dummyDate);
+    const tzPart = parts.find((p) => p.type === "timeZoneName");
+    if (tzPart?.value) {
+      const match = tzPart.value.match(/GMT([+-]\d{2}:\d{2})/);
+      if (match) {
+        offset = match[1];
+      } else if (tzPart.value === "GMT") {
+        offset = "Z";
+      }
+    }
+  } catch {
+    offset = "+05:30";
+  }
+
+  const formattedTime = time24h.length === 5 ? `${time24h}:00` : time24h;
+
+  return {
+    dateTime: `${dateStr}T${formattedTime}${offset === "Z" ? "Z" : offset}`,
+    timeZone: targetTz,
+  };
+}
+
 // Map Google Calendar Category
 function mapCalendarCategory(summary: string): "Team Sync" | "Focus Time" | "Meeting" | "Personal" | "Review" {
   const lower = (summary || "").toLowerCase();
@@ -73,19 +132,23 @@ function formatGoogleEvent(gEvent: any) {
       dateStr = start.slice(0, 10);
       timeStr = "All day";
     } else {
-      const startDate = new Date(start);
-      dateStr = startDate.toISOString().split("T")[0];
-      const endDate = end ? new Date(end) : null;
+      dateStr = start.slice(0, 10);
 
-      const formatTime = (d: Date) => {
-        let hours = d.getHours();
-        const minutes = d.getMinutes().toString().padStart(2, "0");
-        const ampm = hours >= 12 ? "PM" : "AM";
-        hours = hours % 12 || 12;
-        return `${hours.toString().padStart(2, "0")}:${minutes} ${ampm}`;
+      const formatIsoTime = (rawIso: string) => {
+        const tMatch = rawIso.match(/T(\d{1,2}):(\d{2})/);
+        if (tMatch) {
+          let hours = parseInt(tMatch[1], 10);
+          const minutes = tMatch[2];
+          const ampm = hours >= 12 ? "PM" : "AM";
+          hours = hours % 12 || 12;
+          return `${hours.toString().padStart(2, "0")}:${minutes} ${ampm}`;
+        }
+        return "";
       };
 
-      timeStr = endDate ? `${formatTime(startDate)} - ${formatTime(endDate)}` : formatTime(startDate);
+      const sTime = formatIsoTime(start);
+      const eTime = end ? formatIsoTime(end) : "";
+      timeStr = sTime && eTime ? `${sTime} - ${eTime}` : (sTime || "All day");
     }
   }
 
@@ -194,8 +257,8 @@ Deno.serve(async (req: Request) => {
     return data;
   }
 
-  // Helper to retrieve decrypted valid access token (refreshes if expired)
-  async function getValidAccessToken(): Promise<{ token: string; email: string } | null> {
+  // Helper to retrieve decrypted valid access token (refreshes if expired or forced)
+  async function getValidAccessToken(forceRefresh = false): Promise<{ token: string; email: string } | null> {
     const record = await getConnectionRecord();
     if (!record) return null;
 
@@ -211,7 +274,7 @@ Deno.serve(async (req: Request) => {
     const expiresAt = record.token_expires_at ? new Date(record.token_expires_at).getTime() : 0;
     const isExpired = Date.now() >= expiresAt - 60000; // Refresh 1 min before expiry
 
-    if (!isExpired && accessToken) {
+    if (!forceRefresh && !isExpired && accessToken) {
       return { token: accessToken, email: record.google_account_email || "" };
     }
 
@@ -257,8 +320,8 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // If still have access token, return it as best-effort
-    if (accessToken) {
+    // If still have access token and not strictly forcing refresh, return it
+    if (!forceRefresh && accessToken) {
       return { token: accessToken, email: record.google_account_email || "" };
     }
 
@@ -418,7 +481,7 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  const googleToken = authState.token;
+  let googleToken = authState.token;
 
   // -------------------------------------------------------------
   // ROUTE 4: Calendar Events (GET, POST, PATCH, DELETE)
@@ -438,9 +501,20 @@ Deno.serve(async (req: Request) => {
       gUrl.searchParams.set("timeMax", timeMax);
       gUrl.searchParams.set("maxResults", "100");
 
-      const gRes = await fetch(gUrl.toString(), {
+      let gRes = await fetch(gUrl.toString(), {
         headers: { Authorization: `Bearer ${googleToken}` },
       });
+
+      if (gRes.status === 401) {
+        console.warn("[echo-google-sync] 401 fetching events. Attempting token refresh...");
+        const refreshed = await getValidAccessToken(true);
+        if (refreshed?.token) {
+          googleToken = refreshed.token;
+          gRes = await fetch(gUrl.toString(), {
+            headers: { Authorization: `Bearer ${googleToken}` },
+          });
+        }
+      }
 
       if (!gRes.ok) {
         const errorText = await gRes.text();
@@ -474,32 +548,45 @@ Deno.serve(async (req: Request) => {
         const dateStr = body.date || new Date().toISOString().split("T")[0];
         const location = body.location || "";
         const description = body.description || "";
+        const timeZone = body.timeZone || "Asia/Kolkata";
 
-        // Parse time if provided e.g. "09:00 AM - 10:00 AM"
         let startObj: any = { date: dateStr };
         let endObj: any = { date: dateStr };
 
         if (body.startDateTime && body.endDateTime) {
-          startObj = { dateTime: body.startDateTime };
-          endObj = { dateTime: body.endDateTime };
-        } else if (body.time && body.time.includes(" - ")) {
-          const [startRaw, endRaw] = body.time.split(" - ");
-          const parseTime = (tStr: string) => {
-            const match = tStr.trim().match(/(\d+):(\d+)\s*(AM|PM)/i);
-            if (!match) return null;
-            let h = parseInt(match[1], 10);
-            const m = parseInt(match[2], 10);
-            const isPM = match[3].toUpperCase() === "PM";
-            if (isPM && h < 12) h += 12;
-            if (!isPM && h === 12) h = 0;
-            return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:00`;
+          const sHasOffset = /[Zz]|[+-]\d{2}:\d{2}$/.test(body.startDateTime);
+          const eHasOffset = /[Zz]|[+-]\d{2}:\d{2}$/.test(body.endDateTime);
+          startObj = {
+            dateTime: sHasOffset ? body.startDateTime : `${body.startDateTime}+05:30`,
+            timeZone,
           };
+          endObj = {
+            dateTime: eHasOffset ? body.endDateTime : `${body.endDateTime}+05:30`,
+            timeZone,
+          };
+        } else {
+          let rawStart = body.startTime || "";
+          let rawEnd = body.endTime || "";
 
-          const sTime = parseTime(startRaw);
-          const eTime = parseTime(endRaw);
-          if (sTime && eTime) {
-            startObj = { dateTime: `${dateStr}T${sTime}` };
-            endObj = { dateTime: `${dateStr}T${eTime}` };
+          if (!rawStart && body.time && body.time.includes(" - ")) {
+            const [sPart, ePart] = body.time.split(" - ");
+            rawStart = sPart.trim();
+            rawEnd = ePart.trim();
+          } else if (!rawStart && body.time && body.time !== "All day") {
+            rawStart = body.time.trim();
+          }
+
+          const sTime = parseTimeTo24h(rawStart);
+          let eTime = parseTimeTo24h(rawEnd);
+
+          if (sTime) {
+            if (!eTime) {
+              const [sh, sm] = sTime.split(":").map(Number);
+              const eh = (sh + 1) % 24;
+              eTime = `${eh.toString().padStart(2, "0")}:${sm.toString().padStart(2, "0")}:00`;
+            }
+            startObj = getRfc3339WithOffset(dateStr, sTime, timeZone);
+            endObj = getRfc3339WithOffset(dateStr, eTime, timeZone);
           }
         }
 
@@ -514,17 +601,36 @@ Deno.serve(async (req: Request) => {
           createPayload.reminders = body.reminders;
         }
 
-        const createRes = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+        let activeToken = googleToken;
+        let createRes = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${googleToken}`,
+            Authorization: `Bearer ${activeToken}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify(createPayload),
         });
 
+        // If 401 Unauthorized, force refresh token and retry once
+        if (createRes.status === 401) {
+          console.warn("[echo-google-sync] 401 on create event. Attempting token refresh...");
+          const refreshed = await getValidAccessToken(true);
+          if (refreshed?.token) {
+            activeToken = refreshed.token;
+            createRes = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${activeToken}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(createPayload),
+            });
+          }
+        }
+
         if (!createRes.ok) {
           const errText = await createRes.text();
+          console.error("[echo-google-sync] Google Calendar create event error:", createRes.status, errText);
           return new Response(
             JSON.stringify({ error: "Failed to create Google Calendar event.", details: errText }),
             { status: createRes.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -537,6 +643,7 @@ Deno.serve(async (req: Request) => {
           { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       } catch (err: any) {
+        console.error("[echo-google-sync] Exception creating event:", err);
         return new Response(
           JSON.stringify({ error: err.message || "Create event failed." }),
           { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -554,25 +661,72 @@ Deno.serve(async (req: Request) => {
         if (body.description !== undefined) patchPayload.description = body.description;
         if (body.reminders !== undefined) patchPayload.reminders = body.reminders;
 
-        if (body.date) {
-          patchPayload.start = { date: body.date };
-          patchPayload.end = { date: body.date };
+        const timeZone = body.timeZone || "Asia/Kolkata";
+        const dateStr = body.date;
+
+        if (dateStr) {
+          let rawStart = body.startTime || "";
+          let rawEnd = body.endTime || "";
+          if (!rawStart && body.time && body.time.includes(" - ")) {
+            const [sPart, ePart] = body.time.split(" - ");
+            rawStart = sPart.trim();
+            rawEnd = ePart.trim();
+          } else if (!rawStart && body.time && body.time !== "All day") {
+            rawStart = body.time.trim();
+          }
+
+          const sTime = parseTimeTo24h(rawStart);
+          let eTime = parseTimeTo24h(rawEnd);
+
+          if (sTime) {
+            if (!eTime) {
+              const [sh, sm] = sTime.split(":").map(Number);
+              const eh = (sh + 1) % 24;
+              eTime = `${eh.toString().padStart(2, "0")}:${sm.toString().padStart(2, "0")}:00`;
+            }
+            patchPayload.start = getRfc3339WithOffset(dateStr, sTime, timeZone);
+            patchPayload.end = getRfc3339WithOffset(dateStr, eTime, timeZone);
+          } else {
+            patchPayload.start = { date: dateStr };
+            patchPayload.end = { date: dateStr };
+          }
         }
 
-        const patchRes = await fetch(
+        let activeToken = googleToken;
+        let patchRes = await fetch(
           `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`,
           {
             method: "PATCH",
             headers: {
-              Authorization: `Bearer ${googleToken}`,
+              Authorization: `Bearer ${activeToken}`,
               "Content-Type": "application/json",
             },
             body: JSON.stringify(patchPayload),
           }
         );
 
+        if (patchRes.status === 401) {
+          console.warn("[echo-google-sync] 401 on update event. Attempting token refresh...");
+          const refreshed = await getValidAccessToken(true);
+          if (refreshed?.token) {
+            activeToken = refreshed.token;
+            patchRes = await fetch(
+              `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`,
+              {
+                method: "PATCH",
+                headers: {
+                  Authorization: `Bearer ${activeToken}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(patchPayload),
+              }
+            );
+          }
+        }
+
         if (!patchRes.ok) {
           const errText = await patchRes.text();
+          console.error("[echo-google-sync] Google Calendar update event error:", patchRes.status, errText);
           return new Response(
             JSON.stringify({ error: "Failed to update Google Calendar event.", details: errText }),
             { status: patchRes.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -585,6 +739,7 @@ Deno.serve(async (req: Request) => {
           { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       } catch (err: any) {
+        console.error("[echo-google-sync] Exception updating event:", err);
         return new Response(
           JSON.stringify({ error: err.message || "Update event failed." }),
           { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -594,13 +749,29 @@ Deno.serve(async (req: Request) => {
 
     // DELETE /calendar/events/:eventId
     if (req.method === "DELETE" && eventId) {
-      const delRes = await fetch(
+      let activeToken = googleToken;
+      let delRes = await fetch(
         `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`,
         {
           method: "DELETE",
-          headers: { Authorization: `Bearer ${googleToken}` },
+          headers: { Authorization: `Bearer ${activeToken}` },
         }
       );
+
+      if (delRes.status === 401) {
+        console.warn("[echo-google-sync] 401 on delete event. Attempting token refresh...");
+        const refreshed = await getValidAccessToken(true);
+        if (refreshed?.token) {
+          activeToken = refreshed.token;
+          delRes = await fetch(
+            `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`,
+            {
+              method: "DELETE",
+              headers: { Authorization: `Bearer ${activeToken}` },
+            }
+          );
+        }
+      }
 
       if (!delRes.ok && delRes.status !== 404 && delRes.status !== 410) {
         const errText = await delRes.text();
@@ -625,10 +796,23 @@ Deno.serve(async (req: Request) => {
 
     // GET /tasks
     if (req.method === "GET") {
-      const tasksRes = await fetch(
+      let activeToken = googleToken;
+      let tasksRes = await fetch(
         "https://tasks.googleapis.com/tasks/v1/lists/@default/tasks?showCompleted=true&showHidden=true&maxResults=100",
-        { headers: { Authorization: `Bearer ${googleToken}` } }
+        { headers: { Authorization: `Bearer ${activeToken}` } }
       );
+
+      if (tasksRes.status === 401) {
+        console.warn("[echo-google-sync] 401 fetching tasks. Attempting token refresh...");
+        const refreshed = await getValidAccessToken(true);
+        if (refreshed?.token) {
+          activeToken = refreshed.token;
+          tasksRes = await fetch(
+            "https://tasks.googleapis.com/tasks/v1/lists/@default/tasks?showCompleted=true&showHidden=true&maxResults=100",
+            { headers: { Authorization: `Bearer ${activeToken}` } }
+          );
+        }
+      }
 
       if (!tasksRes.ok) {
         const errText = await tasksRes.text();
@@ -666,25 +850,47 @@ Deno.serve(async (req: Request) => {
           status: body.completed ? "completed" : "needsAction",
         };
 
-        if (body.dueDate && body.dueDate !== "Today") {
+        if (body.dueDate) {
           try {
-            taskPayload.due = new Date(body.dueDate).toISOString();
+            if (body.dueDate === "Today") {
+              taskPayload.due = `${new Date().toISOString().split("T")[0]}T00:00:00.000Z`;
+            } else {
+              taskPayload.due = `${new Date(body.dueDate).toISOString().split("T")[0]}T00:00:00.000Z`;
+            }
           } catch {
             // ignore malformed date
           }
         }
 
-        const createRes = await fetch("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks", {
+        let activeToken = googleToken;
+        let createRes = await fetch("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks", {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${googleToken}`,
+            Authorization: `Bearer ${activeToken}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify(taskPayload),
         });
 
+        if (createRes.status === 401) {
+          console.warn("[echo-google-sync] 401 creating task. Attempting token refresh...");
+          const refreshed = await getValidAccessToken(true);
+          if (refreshed?.token) {
+            activeToken = refreshed.token;
+            createRes = await fetch("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${activeToken}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(taskPayload),
+            });
+          }
+        }
+
         if (!createRes.ok) {
           const errText = await createRes.text();
+          console.error("[echo-google-sync] Google Tasks create error:", createRes.status, errText);
           return new Response(
             JSON.stringify({ error: "Failed to create Google task.", details: errText }),
             { status: createRes.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -697,6 +903,7 @@ Deno.serve(async (req: Request) => {
           { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       } catch (err: any) {
+        console.error("[echo-google-sync] Exception creating task:", err);
         return new Response(
           JSON.stringify({ error: err.message || "Create task failed." }),
           { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -720,26 +927,51 @@ Deno.serve(async (req: Request) => {
         }
         if (body.dueDate) {
           try {
-            patchPayload.due = new Date(body.dueDate).toISOString();
+            if (body.dueDate === "Today") {
+              patchPayload.due = `${new Date().toISOString().split("T")[0]}T00:00:00.000Z`;
+            } else {
+              patchPayload.due = `${new Date(body.dueDate).toISOString().split("T")[0]}T00:00:00.000Z`;
+            }
           } catch {
             // ignore
           }
         }
 
-        const patchRes = await fetch(
+        let activeToken = googleToken;
+        let patchRes = await fetch(
           `https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/${encodeURIComponent(taskId)}`,
           {
             method: "PATCH",
             headers: {
-              Authorization: `Bearer ${googleToken}`,
+              Authorization: `Bearer ${activeToken}`,
               "Content-Type": "application/json",
             },
             body: JSON.stringify(patchPayload),
           }
         );
 
+        if (patchRes.status === 401) {
+          console.warn("[echo-google-sync] 401 updating task. Attempting token refresh...");
+          const refreshed = await getValidAccessToken(true);
+          if (refreshed?.token) {
+            activeToken = refreshed.token;
+            patchRes = await fetch(
+              `https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/${encodeURIComponent(taskId)}`,
+              {
+                method: "PATCH",
+                headers: {
+                  Authorization: `Bearer ${activeToken}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(patchPayload),
+              }
+            );
+          }
+        }
+
         if (!patchRes.ok) {
           const errText = await patchRes.text();
+          console.error("[echo-google-sync] Google Tasks update error:", patchRes.status, errText);
           return new Response(
             JSON.stringify({ error: "Failed to update Google task.", details: errText }),
             { status: patchRes.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -752,6 +984,7 @@ Deno.serve(async (req: Request) => {
           { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       } catch (err: any) {
+        console.error("[echo-google-sync] Exception updating task:", err);
         return new Response(
           JSON.stringify({ error: err.message || "Update task failed." }),
           { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -761,13 +994,29 @@ Deno.serve(async (req: Request) => {
 
     // DELETE /tasks/:taskId
     if (req.method === "DELETE" && taskId) {
-      const delRes = await fetch(
+      let activeToken = googleToken;
+      let delRes = await fetch(
         `https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/${encodeURIComponent(taskId)}`,
         {
           method: "DELETE",
-          headers: { Authorization: `Bearer ${googleToken}` },
+          headers: { Authorization: `Bearer ${activeToken}` },
         }
       );
+
+      if (delRes.status === 401) {
+        console.warn("[echo-google-sync] 401 deleting task. Attempting token refresh...");
+        const refreshed = await getValidAccessToken(true);
+        if (refreshed?.token) {
+          activeToken = refreshed.token;
+          delRes = await fetch(
+            `https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/${encodeURIComponent(taskId)}`,
+            {
+              method: "DELETE",
+              headers: { Authorization: `Bearer ${activeToken}` },
+            }
+          );
+        }
+      }
 
       if (!delRes.ok && delRes.status !== 404) {
         const errText = await delRes.text();

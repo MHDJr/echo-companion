@@ -35,6 +35,8 @@ export const ActionDraftCard: React.FC<ActionDraftCardProps> = ({
 
     const updated: ActionDraft = {
       ...draft,
+      status: "pending",
+      executionError: undefined,
       title: editTitle.trim(),
       date: draft.type.includes("event") ? editDate : undefined,
       dueDate: draft.type.includes("task") ? editDate : undefined,

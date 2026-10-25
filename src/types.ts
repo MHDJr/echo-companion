@@ -90,6 +90,9 @@ export interface CalendarEvent {
   googleEventId?: string;
   source?: "google" | "local";
   reminders?: CalendarEventReminders | null;
+  startTime?: string;
+  endTime?: string;
+  timeZone?: string;
 }
 
 export type NavPage = "Home" | "My day" | "Calendar" | "Tasks";

@@ -170,6 +170,36 @@ export async function disconnectGoogleWorkspace(): Promise<boolean> {
 }
 
 // =========================================================================
+// ERROR EXTRACTION HELPER
+// =========================================================================
+
+async function extractEdgeFunctionError(error: any, fallbackMessage: string): Promise<string> {
+  if (!error) return fallbackMessage;
+  if ("context" in error && error.context) {
+    try {
+      const errJson = await (error.context as Response).json();
+      if (errJson?.details) {
+        if (typeof errJson.details === "string") {
+          try {
+            const parsed = JSON.parse(errJson.details);
+            if (parsed?.error?.message) return parsed.error.message;
+          } catch {
+            return errJson.details;
+          }
+          return errJson.details;
+        } else if (errJson.details?.error?.message) {
+          return errJson.details.error.message;
+        }
+      }
+      if (errJson?.error) return errJson.error;
+    } catch {
+      // ignore body stream read error
+    }
+  }
+  return error.message || fallbackMessage;
+}
+
+// =========================================================================
 // GOOGLE CALENDAR CRUD
 // =========================================================================
 
@@ -199,7 +229,8 @@ export async function fetchGoogleCalendarEvents(
 
   if (error) {
     console.warn("[GoogleSync] Error fetching calendar events:", error);
-    throw new Error(error.message || "Failed to fetch Google Calendar events.");
+    const detail = await extractEdgeFunctionError(error, "Failed to fetch Google Calendar events.");
+    throw new Error(detail);
   }
 
   return {
@@ -231,7 +262,8 @@ export async function createGoogleCalendarEvent(
   );
 
   if (error || !data?.event) {
-    throw new Error(error?.message || "Failed to create event on Google Calendar.");
+    const detail = await extractEdgeFunctionError(error, "Failed to create event on Google Calendar.");
+    throw new Error(detail);
   }
 
   return data.event;
@@ -262,7 +294,8 @@ export async function updateGoogleCalendarEvent(
   );
 
   if (error || !data?.event) {
-    throw new Error(error?.message || "Failed to update event on Google Calendar.");
+    const detail = await extractEdgeFunctionError(error, "Failed to update event on Google Calendar.");
+    throw new Error(detail);
   }
 
   return data.event;
@@ -304,7 +337,8 @@ export async function updateCalendarEventReminders(
   );
 
   if (error || !data?.event) {
-    throw new Error(error?.message || "Failed to update reminder settings on Google Calendar.");
+    const detail = await extractEdgeFunctionError(error, "Failed to update reminder settings on Google Calendar.");
+    throw new Error(detail);
   }
 
   return data.event;
@@ -331,7 +365,8 @@ export async function deleteGoogleCalendarEvent(googleEventId: string): Promise<
   );
 
   if (error) {
-    throw new Error(error.message || "Failed to delete event from Google Calendar.");
+    const detail = await extractEdgeFunctionError(error, "Failed to delete event from Google Calendar.");
+    throw new Error(detail);
   }
 }
 
@@ -355,7 +390,8 @@ export async function fetchGoogleTasks(): Promise<TaskItem[]> {
 
   if (error) {
     console.warn("[GoogleSync] Error fetching tasks:", error);
-    throw new Error(error.message || "Failed to fetch Google Tasks.");
+    const detail = await extractEdgeFunctionError(error, "Failed to fetch Google Tasks.");
+    throw new Error(detail);
   }
 
   return Array.isArray(data?.tasks) ? data.tasks : [];
@@ -379,7 +415,8 @@ export async function createGoogleTask(task: Omit<TaskItem, "id">): Promise<Task
   });
 
   if (error || !data?.task) {
-    throw new Error(error?.message || "Failed to create Google task.");
+    const detail = await extractEdgeFunctionError(error, "Failed to create Google task.");
+    throw new Error(detail);
   }
 
   return data.task;
@@ -410,7 +447,8 @@ export async function updateGoogleTask(
   );
 
   if (error || !data?.task) {
-    throw new Error(error?.message || "Failed to update Google task.");
+    const detail = await extractEdgeFunctionError(error, "Failed to update Google task.");
+    throw new Error(detail);
   }
 
   return data.task;
@@ -437,6 +475,7 @@ export async function deleteGoogleTask(googleTaskId: string): Promise<void> {
   );
 
   if (error) {
-    throw new Error(error.message || "Failed to delete Google task.");
+    const detail = await extractEdgeFunctionError(error, "Failed to delete Google task.");
+    throw new Error(detail);
   }
 }
