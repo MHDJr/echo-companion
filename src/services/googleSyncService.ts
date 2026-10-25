@@ -2,6 +2,24 @@ import { supabase, getCurrentSession, getAuthRedirectUrl } from "./supabaseClien
 import type { CalendarEvent, TaskItem, GoogleSyncStatus } from "../types";
 
 const EDGE_FUNCTION_NAME = "echo-google-sync";
+const STATUS_CACHE_KEY = "echo_google_sync_status_cache_v1";
+
+/**
+ * Retrieve cached status synchronously to prevent initial render latency.
+ */
+export function getCachedGoogleSyncStatus(): GoogleSyncStatus {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      const raw = window.localStorage.getItem(STATUS_CACHE_KEY);
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    }
+  } catch {
+    // fallback
+  }
+  return { isConnected: false, calendarConnected: false, tasksConnected: false };
+}
 
 /**
  * Fetch the current Google connection and sync status from the backend Edge Function.
@@ -25,7 +43,7 @@ export async function getGoogleSyncStatus(): Promise<GoogleSyncStatus> {
       return { isConnected: false, calendarConnected: false, tasksConnected: false, error: error.message };
     }
 
-    return {
+    const status: GoogleSyncStatus = {
       isConnected: Boolean(data?.isConnected),
       calendarConnected: Boolean(data?.calendarConnected),
       tasksConnected: Boolean(data?.tasksConnected),
@@ -33,6 +51,17 @@ export async function getGoogleSyncStatus(): Promise<GoogleSyncStatus> {
       lastSyncedAt: data?.lastSyncedAt || null,
       scopes: data?.scopes || [],
     };
+
+    // Cache locally for instantaneous startup on next session
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        window.localStorage.setItem(STATUS_CACHE_KEY, JSON.stringify(status));
+      }
+    } catch {
+      // ignore
+    }
+
+    return status;
   } catch (err: any) {
     console.error("[GoogleSync] Exception fetching status:", err);
     return { isConnected: false, calendarConnected: false, tasksConnected: false, error: err?.message };
@@ -45,7 +74,7 @@ export async function getGoogleSyncStatus(): Promise<GoogleSyncStatus> {
  */
 export async function connectGoogleWorkspaceOAuth(customRedirect?: string) {
   const redirectUrl = getAuthRedirectUrl(customRedirect);
-  return supabase.auth.signInWithOAuth({
+  const result = await supabase.auth.signInWithOAuth({
     provider: "google",
     options: {
       redirectTo: redirectUrl,
@@ -56,6 +85,11 @@ export async function connectGoogleWorkspaceOAuth(customRedirect?: string) {
       },
     },
   });
+
+  if (result.data?.url && typeof window !== "undefined") {
+    window.location.href = result.data.url;
+  }
+  return result;
 }
 
 /**
@@ -116,6 +150,16 @@ export async function disconnectGoogleWorkspace(): Promise<boolean> {
     if (error) {
       console.error("[GoogleSync] Disconnect error:", error);
       return false;
+    }
+
+    if (data?.success) {
+      try {
+        if (typeof window !== "undefined" && window.localStorage) {
+          window.localStorage.removeItem(STATUS_CACHE_KEY);
+        }
+      } catch {
+        // ignore
+      }
     }
 
     return Boolean(data?.success);

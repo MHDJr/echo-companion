@@ -31,19 +31,20 @@ export function AuthModal({
     setIsGoogleLoading(true);
 
     try {
-      const { error } = await signInWithGoogle();
-      if (error) {
+      const res = await signInWithGoogle();
+      if (res?.error) {
         // Helpful diagnostic message if provider is not yet enabled in Dashboard
-        if (error.message?.toLowerCase().includes("unsupported provider") || error.message?.toLowerCase().includes("not enabled")) {
+        if (res.error.message?.toLowerCase().includes("unsupported provider") || res.error.message?.toLowerCase().includes("not enabled")) {
           setErrorMessage(
             "Google sign-in is not yet enabled in your Supabase project dashboard. Go to Supabase Dashboard > Authentication > Providers > Google to configure credentials."
           );
         } else {
-          setErrorMessage(error.message);
+          setErrorMessage(res.error.message);
         }
         setIsGoogleLoading(false);
+      } else if (res?.data?.url && typeof window !== "undefined") {
+        window.location.href = res.data.url;
       }
-      // Note: If OAuth flow starts successfully, browser will redirect to Google sign-in page.
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : "Failed to initiate Google sign-in.");
       setIsGoogleLoading(false);

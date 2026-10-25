@@ -64,7 +64,7 @@ export async function signInWithGoogle(redirectTo?: string) {
   // Google Calendar and Google Tasks service access are handled separately.
   const redirectUrl = getAuthRedirectUrl(redirectTo);
 
-  return supabase.auth.signInWithOAuth({
+  const res = await supabase.auth.signInWithOAuth({
     provider: "google",
     options: {
       redirectTo: redirectUrl,
@@ -73,6 +73,11 @@ export async function signInWithGoogle(redirectTo?: string) {
       },
     },
   });
+
+  if (res.data?.url && typeof window !== "undefined") {
+    window.location.href = res.data.url;
+  }
+  return res;
 }
 
 export async function signOutUser() {

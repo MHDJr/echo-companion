@@ -37,7 +37,10 @@ export function GoogleSyncBadge({
   async function handleConnect() {
     setLoading(true);
     try {
-      await connectGoogleWorkspaceOAuth();
+      const res = await connectGoogleWorkspaceOAuth();
+      if (res?.data?.url && typeof window !== "undefined") {
+        window.location.href = res.data.url;
+      }
     } catch (err) {
       console.error("[GoogleSyncBadge] Connect error:", err);
     } finally {

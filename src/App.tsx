@@ -1,13 +1,14 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import type { User } from "@supabase/supabase-js";
 import "./App.css";
 import type { CalendarEvent, Message, NavPage, TaskItem, GoogleSyncStatus } from "./types";
 import { initialCalendarEvents, initialTasks } from "./data/mockData";
 import { taskService } from "./services/taskService";
-import { getCurrentUser, getCurrentSession, supabase } from "./services/supabaseClient";
+import { getCurrentSession, supabase } from "./services/supabaseClient";
 import { sendChatMessage } from "./services/aiService";
 import {
   getGoogleSyncStatus,
+  getCachedGoogleSyncStatus,
   linkSessionTokens,
   fetchGoogleCalendarEvents,
   createGoogleCalendarEvent,
@@ -41,12 +42,11 @@ function App() {
   const [isAiResponding, setIsAiResponding] = useState(false);
   const homeTextareaRef = useRef<HTMLTextAreaElement>(null);
 
+  const isSyncingRef = useRef(false);
+  const lastSyncTimeRef = useRef(0);
+
   // Google Workspace two-way synchronization state
-  const [googleSyncStatus, setGoogleSyncStatus] = useState<GoogleSyncStatus>({
-    isConnected: false,
-    calendarConnected: false,
-    tasksConnected: false,
-  });
+  const [googleSyncStatus, setGoogleSyncStatus] = useState<GoogleSyncStatus>(() => getCachedGoogleSyncStatus());
   const [isSyncingGoogle, setIsSyncingGoogle] = useState(false);
   const [showGooglePrompt, setShowGooglePrompt] = useState(() => {
     try {
@@ -91,11 +91,13 @@ function App() {
     });
   }, []);
 
-  // Synchronize Google Workspace data (Calendar & Tasks)
-  const syncGoogleData = async () => {
+  // Synchronize Google Workspace data (Calendar & Tasks) - concurrency guarded and parallelized
+  const syncGoogleData = useCallback(async () => {
+    if (isSyncingRef.current) return;
     const session = await getCurrentSession();
-    if (!session) return;
+    if (!session || !session.access_token) return;
 
+    isSyncingRef.current = true;
     setIsSyncingGoogle(true);
     try {
       const status = await getGoogleSyncStatus();
@@ -103,42 +105,42 @@ function App() {
       taskService.setGoogleConnected(status.isConnected);
 
       if (status.isConnected) {
-        // Fetch Calendar events
-        try {
-          const calData = await fetchGoogleCalendarEvents();
-          if (calData.events && calData.events.length > 0) {
-            setCalendarEvents((prev) => {
-              const localNonGoogle = prev.filter((e) => !e.googleEventId && e.source !== "google");
-              return [...calData.events, ...localNonGoogle];
-            });
-          }
-        } catch (calErr) {
-          console.warn("[App] Google Calendar sync warning:", calErr);
+        const [calRes, taskRes] = await Promise.allSettled([
+          fetchGoogleCalendarEvents(),
+          taskService.getTasks(),
+        ]);
+
+        if (calRes.status === "fulfilled" && calRes.value.events && calRes.value.events.length > 0) {
+          setCalendarEvents((prev) => {
+            const localNonGoogle = prev.filter((e) => !e.googleEventId && e.source !== "google");
+            return [...calRes.value.events, ...localNonGoogle];
+          });
         }
 
-        // Fetch Tasks
-        try {
-          const loadedTasks = await taskService.getTasks();
-          setTasks(loadedTasks);
-        } catch (tErr) {
-          console.warn("[App] Google Tasks sync warning:", tErr);
+        if (taskRes.status === "fulfilled") {
+          setTasks(taskRes.value);
         }
       }
+      lastSyncTimeRef.current = Date.now();
     } catch (err) {
       console.warn("[App] Google sync status error:", err);
     } finally {
+      isSyncingRef.current = false;
       setIsSyncingGoogle(false);
     }
-  };
+  }, []);
 
-  // Sync Supabase Authentication state and handle OAuth redirect error detection
+  // Sync Supabase Authentication state once on mount
   useEffect(() => {
-    getCurrentUser().then((u) => {
-      setCurrentUser(u);
-      if (u) syncGoogleData();
+    getCurrentSession().then((session) => {
+      const user = session?.user ?? null;
+      setCurrentUser(user);
+      if (user) {
+        syncGoogleData();
+      }
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       const user = session?.user ?? null;
       setCurrentUser(user);
 
@@ -146,21 +148,13 @@ function App() {
         await linkSessionTokens(session.provider_token, session.provider_refresh_token);
       }
 
-      if (user) {
+      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
         syncGoogleData();
-      } else {
+      } else if (event === "SIGNED_OUT") {
         setGoogleSyncStatus({ isConnected: false, calendarConnected: false, tasksConnected: false });
         taskService.setGoogleConnected(false);
       }
     });
-
-    // Background/Foreground refresh on window focus
-    function handleWindowFocus() {
-      if (currentUser && googleSyncStatus.isConnected) {
-        syncGoogleData();
-      }
-    }
-    window.addEventListener("focus", handleWindowFocus);
 
     // Check for OAuth callback error in URL parameters or hash
     if (typeof window !== "undefined") {
@@ -195,9 +189,19 @@ function App() {
 
     return () => {
       subscription.unsubscribe();
-      window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [currentUser, googleSyncStatus.isConnected]);
+  }, [syncGoogleData]);
+
+  // Foreground refresh on window focus (rate limited to once every 45s)
+  useEffect(() => {
+    function handleWindowFocus() {
+      if (Date.now() - lastSyncTimeRef.current > 45000) {
+        syncGoogleData();
+      }
+    }
+    window.addEventListener("focus", handleWindowFocus);
+    return () => window.removeEventListener("focus", handleWindowFocus);
+  }, [syncGoogleData]);
 
   async function sendMessage(text = input) {
     const message = text.trim();

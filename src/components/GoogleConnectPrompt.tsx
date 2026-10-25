@@ -20,12 +20,13 @@ export function GoogleConnectPrompt({
     setLoading(true);
     setErrorMsg(null);
     try {
-      const { error } = await connectGoogleWorkspaceOAuth();
-      if (error) {
-        setErrorMsg(error.message);
+      const res = await connectGoogleWorkspaceOAuth();
+      if (res?.error) {
+        setErrorMsg(res.error.message);
         setLoading(false);
+      } else if (res?.data?.url && typeof window !== "undefined") {
+        window.location.href = res.data.url;
       }
-      // Note: Browser will redirect to Google incremental OAuth consent screen
     } catch (err: any) {
       setErrorMsg(err?.message || "Failed to initiate Google connection.");
       setLoading(false);
