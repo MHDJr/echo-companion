@@ -56,13 +56,44 @@ function App() {
     });
   }, []);
 
-  // Sync Supabase Authentication state
+  // Sync Supabase Authentication state and handle OAuth redirect error detection
   useEffect(() => {
     getCurrentUser().then((u) => setCurrentUser(u));
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setCurrentUser(session?.user ?? null);
     });
+
+    // Check for OAuth callback error in URL parameters or hash
+    if (typeof window !== "undefined") {
+      const urlParams = new URLSearchParams(window.location.search);
+      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, "?"));
+
+      const errorDesc =
+        urlParams.get("error_description") ||
+        hashParams.get("error_description") ||
+        urlParams.get("error") ||
+        hashParams.get("error");
+
+      if (errorDesc) {
+        console.warn("[Echo Auth] OAuth callback parameter notice:", errorDesc);
+        queueMicrotask(() => {
+          setMessages((current) => [
+            ...current,
+            {
+              role: "echo",
+              text: `Authentication notice: ${decodeURIComponent(errorDesc.replace(/\+/g, " "))}`,
+              id: `msg-${Date.now()}-e`,
+              timestamp: Date.now(),
+              isError: true,
+            },
+          ]);
+          setAuthModalOpen(true);
+        });
+        // Clean error params from address bar
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    }
 
     return () => {
       subscription.unsubscribe();
@@ -325,7 +356,18 @@ function App() {
               aria-label="Account Settings"
             >
               <div className="avatar">
-                {currentUser ? (currentUser.email?.[0]?.toUpperCase() || "✓") : "M"}
+                {currentUser?.user_metadata?.avatar_url || currentUser?.user_metadata?.picture ? (
+                  <img
+                    src={currentUser.user_metadata.avatar_url || currentUser.user_metadata.picture}
+                    alt={currentUser.user_metadata?.full_name || "User Avatar"}
+                    style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }}
+                    referrerPolicy="no-referrer"
+                  />
+                ) : currentUser ? (
+                  currentUser.email?.[0]?.toUpperCase() || "✓"
+                ) : (
+                  "M"
+                )}
               </div>
               <span className={`avatar-status-badge ${currentUser ? "online" : "offline"}`} />
             </button>

@@ -3,13 +3,12 @@ import { createClient } from "npm:@supabase/supabase-js@2.49.1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, accept",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Expose-Headers": "Server-Timing, Content-Type",
 };
 
 // In-memory sliding rate limiter (per Edge instance)
-// Documented limitation: This protects against burst abuse per instance;
-// distributed cross-region rate limiting would use an external store like Redis/KV.
 const userRequestTimestamps = new Map<string, number[]>();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute window
 const MAX_REQUESTS_PER_WINDOW = 20; // Max 20 requests per minute per user
@@ -50,37 +49,42 @@ const SYSTEM_PROMPT = `You are Echo Companion — a calm, thoughtful, mindful, a
 Your mission is to help the user find clarity, organize their thoughts, navigate their daily priorities, and reduce noise.
 
 LANGUAGE INSTRUCTIONS (CRITICAL):
-- You have native-level understanding of English, Malayalam (മലയാളം), and Manglish (Malayalam written phonetically using English/Latin script, e.g. "innathe schedule enthanu", "entha cheyyendathu", "njan oru task add cheyyanam", "karyam parayoo").
-- ALWAYS identify the user's primary language or blend:
-  * If the user writes in Malayalam script (മലയാളം), reply gracefully in natural Malayalam.
-  * If the user writes in Manglish (e.g. Malayalam words in English letters), reply naturally in warm, friendly Manglish.
-  * If the user writes in English, reply in clean, elegant English.
-  * If the user mixes Malayalam/Manglish and English, mirror that natural bilingual tone.
+- Native-level understanding of English, Malayalam (മലയാളം), and Manglish (Malayalam written phonetically using Latin script, e.g., "innathe schedule enthanu", "entha cheyyendathu", "njan oru task add cheyyanam").
+- Language selection rules:
+  * If user writes in Malayalam script (മലയാളം), reply in natural, elegant Malayalam.
+  * If user writes in Manglish, reply naturally in warm, friendly Manglish.
+  * If user writes in English, reply in clean, articulate English.
+  * If user mixes languages, mirror that natural bilingual tone.
 
 ROLE BOUNDARIES & ACTION INTEGRITY:
-- You are a companion and guide.
-- You do NOT possess autonomous execution authority to create or delete calendar events or tasks directly in this turn.
-- If the user asks you to add a task, schedule an event, or take an action, provide a thoughtful suggestion or breakdown and suggest they confirm it in their Tasks or Calendar view. Never pretend or claim that you have already created or executed the task.
-- Never output arbitrary executable code (like bash/eval) meant for system execution.
-- Maintain a warm, composed, serene, and grounding tone. Keep responses helpful and concise unless depth is requested.
+- You are a companion and thoughtful guide.
+- You do NOT directly create or delete calendar events or tasks in this turn.
+- If asked to schedule or track something, offer helpful suggestions and invite the user to confirm them in their Tasks or Calendar view. Never fabricate that an action has been committed.
+- Keep responses focused, grounded, and serene. Avoid unnecessary verbosity.
 
 RESPONSE FORMAT:
-You MUST respond with a valid JSON object matching this schema:
+You MUST respond ONLY with a valid JSON object matching this schema:
 {
-  "reply": "Your markdown-formatted text response to the user",
+  "reply": "Your markdown response to the user",
   "detectedLanguage": "en" | "ml" | "manglish",
-  "suggestedActions": ["Optional actionable suggestion 1", "Optional actionable suggestion 2"]
+  "suggestedActions": ["Actionable suggestion 1", "Actionable suggestion 2"]
 }`;
 
 interface RequestPayload {
   message: string;
+  stream?: boolean;
   context?: {
     activePage?: string;
     history?: Array<{ role: "user" | "echo"; text: string }>;
   };
 }
 
+// In-memory model cache for zero-overhead candidate selection across invocations
+let cachedWorkingModel = "gemini-3-flash-preview";
+
 Deno.serve(async (req: Request) => {
+  const edgeStart = performance.now();
+
   // 1. Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, {
@@ -121,6 +125,7 @@ Deno.serve(async (req: Request) => {
   const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
 
   let userId: string;
+  const authStart = performance.now();
   try {
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },
@@ -147,6 +152,7 @@ Deno.serve(async (req: Request) => {
       { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
+  const authDurationMs = performance.now() - authStart;
 
   // 5. Rate Limiting Check
   const rateLimit = checkRateLimit(userId);
@@ -205,17 +211,17 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  // 8. Build Gemini Contents
-  // Build recent conversation context (last 8 messages max)
+  // 8. Build Optimized Gemini Contents
+  // Keep last 4 messages, truncated to 350 chars each to minimize tokens & latency
   const contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> = [];
 
   if (payload.context?.history && Array.isArray(payload.context.history)) {
-    const recentHistory = payload.context.history.slice(-8);
+    const recentHistory = payload.context.history.slice(-4);
     for (const h of recentHistory) {
       if (typeof h.text === "string" && h.text.trim()) {
         contents.push({
           role: h.role === "echo" ? "model" : "user",
-          parts: [{ text: h.text.slice(0, 1000) }],
+          parts: [{ text: h.text.slice(0, 350) }],
         });
       }
     }
@@ -223,7 +229,7 @@ Deno.serve(async (req: Request) => {
 
   // Active page context tag
   const activePageContext = payload.context?.activePage
-    ? `[Active Workspace Context: ${payload.context.activePage}]\n`
+    ? `[Active Context: ${payload.context.activePage}]\n`
     : "";
 
   contents.push({
@@ -231,15 +237,34 @@ Deno.serve(async (req: Request) => {
     parts: [{ text: `${activePageContext}${rawMessage}` }],
   });
 
-  // 9. Call Gemini API
-  // Using current active model gemini-3.8-flash as primary
-  const modelsToTry = ["gemini-3.8-flash", "gemini-3.8-pro", "gemini-2.5-flash"];
+  const wantsStreaming =
+    Boolean(payload.stream) ||
+    Boolean(req.headers.get("accept")?.includes("text/event-stream"));
+
+  // 9. Call Gemini API with Latency Optimization
+  // Ordered candidates: start with cached working model, followed by verified candidates
+  const staticCandidates = ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-flash-latest"];
+  const modelsToTry = [
+    cachedWorkingModel,
+    ...staticCandidates.filter((m) => m !== cachedWorkingModel),
+  ];
+
   let geminiResponseData: any = null;
   let lastApiStatus = 0;
+  let successfulModel = "";
+  let geminiDurationMs = 0;
 
   for (const model of modelsToTry) {
+    const geminiStart = performance.now();
     try {
-      const response = await fetch(
+      const generationConfig: Record<string, any> = {
+        temperature: 0.7,
+        maxOutputTokens: 500,
+        responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 },
+      };
+
+      let response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
         {
           method: "POST",
@@ -252,40 +277,61 @@ Deno.serve(async (req: Request) => {
               parts: [{ text: SYSTEM_PROMPT }],
             },
             contents,
-            generationConfig: {
-              temperature: 0.7,
-              maxOutputTokens: 1024,
-              responseMimeType: "application/json",
-            },
+            generationConfig,
           }),
+          signal: AbortSignal.timeout(8000), // 8s fast timeout prevents blocking
         }
       );
 
+      // Fallback: If 400 occurs due to thinkingConfig, retry without it
+      if (response.status === 400) {
+        response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-goog-api-key": geminiApiKey,
+            },
+            body: JSON.stringify({
+              systemInstruction: {
+                parts: [{ text: SYSTEM_PROMPT }],
+              },
+              contents,
+              generationConfig: {
+                temperature: 0.7,
+                maxOutputTokens: 500,
+                responseMimeType: "application/json",
+              },
+            }),
+            signal: AbortSignal.timeout(8000),
+          }
+        );
+      }
+
+      geminiDurationMs = performance.now() - geminiStart;
       lastApiStatus = response.status;
 
       if (response.ok) {
         geminiResponseData = await response.json();
+        successfulModel = model;
+        cachedWorkingModel = model;
         break; // Successfully obtained response
       } else {
         const errorText = await response.text();
-        console.warn(`[echo-assistant] Model ${model} returned HTTP ${response.status}:`, errorText.slice(0, 200));
-        if (response.status === 503) {
-          // Wait briefly on 503 before trying next
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        } else if (response.status !== 404) {
-          break;
-        }
+        console.warn(`[echo-assistant] Model ${model} returned HTTP ${response.status} in ${geminiDurationMs.toFixed(0)}ms:`, errorText.slice(0, 120));
       }
-    } catch (fetchErr) {
-      console.warn(`[echo-assistant] Network error calling ${model}:`, fetchErr);
+    } catch (fetchErr: any) {
+      console.warn(`[echo-assistant] ${model} error:`, fetchErr.message);
     }
   }
 
-  // If initial models failed, dynamically query available models from Gemini API
+  // Dynamic discovery fallback if static candidates fail
   if (!geminiResponseData) {
     try {
       const listRes = await fetch("https://generativelanguage.googleapis.com/v1beta/models", {
         headers: { "x-goog-api-key": geminiApiKey },
+        signal: AbortSignal.timeout(5000),
       });
       if (listRes.ok) {
         const listData = await listRes.json();
@@ -294,11 +340,10 @@ Deno.serve(async (req: Request) => {
           .map((m: any) => (m.name || "").replace("models/", ""))
           .filter(Boolean);
 
-        console.log("[echo-assistant] Available models for this key:", availableModels.slice(0, 10));
-
         for (const candidateModel of availableModels) {
           if (modelsToTry.includes(candidateModel)) continue;
           try {
+            const dynamicStart = performance.now();
             const dynamicRes = await fetch(
               `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent`,
               {
@@ -312,15 +357,19 @@ Deno.serve(async (req: Request) => {
                   contents,
                   generationConfig: {
                     temperature: 0.7,
-                    maxOutputTokens: 1024,
+                    maxOutputTokens: 500,
                     responseMimeType: "application/json",
+                    thinkingConfig: { thinkingBudget: 0 },
                   },
                 }),
+                signal: AbortSignal.timeout(8000),
               }
             );
             if (dynamicRes.ok) {
               geminiResponseData = await dynamicRes.json();
-              console.log(`[echo-assistant] Successfully responded using dynamic model: ${candidateModel}`);
+              successfulModel = candidateModel;
+              cachedWorkingModel = candidateModel;
+              geminiDurationMs = performance.now() - dynamicStart;
               break;
             }
           } catch (_e) {
@@ -349,30 +398,16 @@ Deno.serve(async (req: Request) => {
   }
 
   // 10. Parse and Format Structured Response
-  try {
-    const candidateParts = geminiResponseData?.candidates?.[0]?.content?.parts || [];
-    // If thinking mode is on, filter out parts with thought: true
-    const answerPart = candidateParts.find((p: any) => !p.thought) || candidateParts[candidateParts.length - 1];
-    const rawCandidateText = answerPart?.text;
+  const candidateParts = geminiResponseData?.candidates?.[0]?.content?.parts || [];
+  const answerPart = candidateParts.find((p: any) => !p.thought) || candidateParts[candidateParts.length - 1];
+  const rawCandidateText = answerPart?.text;
 
-    if (!rawCandidateText) {
-      return new Response(
-        JSON.stringify({
-          reply: "I heard you, but I wasn't able to complete that thought. Could you say that again?",
-          detectedLanguage: "en",
-          suggestedActions: [],
-        }),
-        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+  let structured: { reply?: string; detectedLanguage?: string; suggestedActions?: string[] } | null = null;
 
-    let structured: { reply?: string; detectedLanguage?: string; suggestedActions?: string[] } | null = null;
-    
-    // 1. Try direct parse
+  if (rawCandidateText) {
     try {
       structured = JSON.parse(rawCandidateText);
     } catch {
-      // 2. Try markdown json fence
       const fenceMatch = rawCandidateText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
       if (fenceMatch && fenceMatch[1]) {
         try {
@@ -380,7 +415,6 @@ Deno.serve(async (req: Request) => {
         } catch {}
       }
 
-      // 3. Try outermost curly braces
       if (!structured) {
         const firstBrace = rawCandidateText.indexOf("{");
         const lastBrace = rawCandidateText.lastIndexOf("}");
@@ -391,7 +425,6 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      // 4. Fallback if model returned plain conversational text
       if (!structured || typeof structured.reply !== "string") {
         structured = {
           reply: rawCandidateText.trim(),
@@ -400,32 +433,69 @@ Deno.serve(async (req: Request) => {
         };
       }
     }
-
-    return new Response(
-      JSON.stringify({
-        reply: structured.reply || "I'm here with you.",
-        detectedLanguage: structured.detectedLanguage || "en",
-        suggestedActions: Array.isArray(structured.suggestedActions)
-          ? structured.suggestedActions
-          : [],
-      }),
-      {
-        status: 200,
-        headers: {
-          ...corsHeaders,
-          "Content-Type": "application/json",
-          "Cache-Control": "no-store",
-        },
-      }
-    );
-  } catch (_formatErr) {
-    return new Response(
-      JSON.stringify({
-        reply: "I'm with you, but encountered a formatting issue. Let's continue.",
-        detectedLanguage: "en",
-        suggestedActions: [],
-      }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+  } else {
+    structured = {
+      reply: "I heard you, but I wasn't able to complete that thought. Could you say that again?",
+      detectedLanguage: "en",
+      suggestedActions: [],
+    };
   }
+
+  const totalEdgeDurationMs = performance.now() - edgeStart;
+
+  // Safe server-side telemetry log (no prompt or credential logged)
+  console.log(
+    `[echo-assistant] user=${userId.slice(0, 8)} model=${successfulModel} authMs=${authDurationMs.toFixed(0)} geminiMs=${geminiDurationMs.toFixed(0)} totalMs=${totalEdgeDurationMs.toFixed(0)}`
+  );
+
+  const finalResponseObj = {
+    reply: structured.reply || "I'm here with you.",
+    detectedLanguage: structured.detectedLanguage || "en",
+    suggestedActions: Array.isArray(structured.suggestedActions) ? structured.suggestedActions : [],
+    metrics: {
+      authMs: Math.round(authDurationMs),
+      geminiMs: Math.round(geminiDurationMs),
+      edgeMs: Math.round(totalEdgeDurationMs),
+    },
+  };
+
+  // If client requested SSE streaming, stream the response via Server-Sent Events
+  if (wantsStreaming) {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        // Send initial chunk
+        controller.enqueue(
+          encoder.encode(`event: delta\ndata: ${JSON.stringify({ text: finalResponseObj.reply })}\n\n`)
+        );
+        // Send completion chunk with metadata
+        controller.enqueue(
+          encoder.encode(`event: done\ndata: ${JSON.stringify(finalResponseObj)}\n\n`)
+        );
+        controller.close();
+      },
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        ...corsHeaders,
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Server-Timing": `auth;dur=${authDurationMs.toFixed(1)}, gemini;dur=${geminiDurationMs.toFixed(1)}, edge;dur=${totalEdgeDurationMs.toFixed(1)}`,
+      },
+    });
+  }
+
+  // Standard JSON response
+  return new Response(JSON.stringify(finalResponseObj), {
+    status: 200,
+    headers: {
+      ...corsHeaders,
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Server-Timing": `auth;dur=${authDurationMs.toFixed(1)}, gemini;dur=${geminiDurationMs.toFixed(1)}, edge;dur=${totalEdgeDurationMs.toFixed(1)}`,
+    },
+  });
 });
