@@ -20,6 +20,11 @@ export type TaskItem = {
   category: TaskCategory;
   priority: TaskPriority;
   isTodayPriority?: boolean;
+  googleTaskId?: string;
+  googleTaskListId?: string;
+  notes?: string;
+  updated?: string;
+  source?: "google" | "local";
 };
 
 export type CalendarCategory = "Team Sync" | "Focus Time" | "Meeting" | "Personal" | "Review";
@@ -31,7 +36,22 @@ export type CalendarEvent = {
   time: string; // e.g. "09:00 AM - 10:00 AM"
   category: CalendarCategory;
   location?: string;
+  description?: string;
   isDemo: boolean;
+  googleEventId?: string;
+  source?: "google" | "local";
 };
 
 export type NavPage = "Home" | "My day" | "Calendar" | "Tasks";
+
+export type GoogleSyncStatus = {
+  isConnected: boolean;
+  calendarConnected: boolean;
+  tasksConnected: boolean;
+  googleEmail?: string | null;
+  scopes?: string[];
+  lastSyncedAt?: string | null;
+  isSyncing?: boolean;
+  error?: string | null;
+};
+

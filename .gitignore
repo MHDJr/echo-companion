@@ -34,3 +34,5 @@ dist-ssr
 
 # Supabase CLI
 .supabase/
+.vercel
+.env*

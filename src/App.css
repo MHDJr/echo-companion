@@ -528,14 +528,29 @@ h1 > span, .section-subtitle-span {
   font-size: 14px;
 }
 
+.chat-area {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .composer {
-  margin-top: 32px;
-  padding: 16px 16px 12px;
+  margin-top: 20px;
+  padding: 12px 14px 10px;
   border: 1px solid #dedfd5;
   border-radius: 14px;
   background: #fdfdf9;
-  box-shadow: 0 5px 20px rgba(51, 59, 48, 0.04);
+  box-shadow: 0 4px 16px rgba(51, 59, 48, 0.04);
   transition: border-color 0.2s, box-shadow 0.2s;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .composer:focus-within {
   border-color: #aab99d;
@@ -544,14 +559,22 @@ h1 > span, .section-subtitle-span {
 .composer textarea {
   display: block;
   width: 100%;
-  min-height: 48px;
-  resize: vertical;
+  box-sizing: border-box;
+  min-height: 28px;
+  max-height: 140px;
+  overflow-y: auto;
+  resize: none;
   border: 0;
   outline: 0;
   background: transparent;
   color: #30372d;
   font-size: 13px;
-  line-height: 1.7;
+  line-height: 1.5;
+  padding: 0;
+  margin: 0;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  field-sizing: content;
 }
 .composer textarea::placeholder {
   color: #a1a497;
@@ -564,19 +587,25 @@ h1 > span, .section-subtitle-span {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 12px;
+  margin-top: 8px;
   gap: 10px;
+  min-width: 0;
+  flex-shrink: 0;
 }
 .composer-hint {
   color: #a1a497;
   font-size: 10px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
 }
 .composer-actions {
   display: flex;
   align-items: center;
   gap: 9px;
   margin-left: auto;
+  flex-shrink: 0;
 }
 
 .voice-button, .send-button {
@@ -659,6 +688,12 @@ h1 > span, .section-subtitle-span {
 .messages {
   display: grid;
   gap: 16px;
+  max-height: 520px;
+  overflow-y: auto;
+  padding-right: 6px;
+  margin-bottom: 8px;
+  overscroll-behavior: contain;
+  min-width: 0;
 }
 .message {
   max-width: 88%;
@@ -2137,12 +2172,15 @@ h1 > span, .section-subtitle-span {
 }
 .companion-composer {
   margin-top: 0;
-  padding: 12px 14px 10px;
+  padding: 10px 12px 8px;
   background: #ffffff;
+  border-radius: 12px;
 }
 .companion-composer textarea {
-  min-height: 42px;
+  min-height: 26px;
+  max-height: 110px;
   font-size: 12px;
+  line-height: 1.45;
 }
 
 /* ========================================================
@@ -3073,3 +3111,437 @@ h1 > span, .section-subtitle-span {
 .auth-done-btn:hover {
   background: #243420;
 }
+
+/* =========================================================================
+   Google Workspace Integration & Sync Styles
+   ========================================================================= */
+
+.google-connect-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: linear-gradient(135deg, #f5f8f3 0%, #edf3eb 100%);
+  border: 1px solid #d4e0cf;
+  border-radius: 12px;
+  padding: 12px 18px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 3px rgba(45, 60, 40, 0.04);
+}
+
+.google-connect-banner.connected {
+  background: linear-gradient(135deg, #f3f7f2 0%, #e8f0e5 100%);
+  border-color: #c7d9c2;
+}
+
+.google-banner-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.google-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.google-status-dot.online {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
+}
+
+.google-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.google-banner-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #273723;
+  margin: 0 0 2px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.google-banner-email {
+  font-size: 11px;
+  font-weight: 600;
+  color: #5c6e56;
+}
+
+.google-banner-desc {
+  font-size: 11px;
+  color: #556650;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.google-banner-error {
+  font-size: 11px;
+  color: #dc2626;
+  margin: 4px 0 0 0;
+  font-weight: 600;
+}
+
+.google-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.google-connect-btn {
+  background: #344830;
+  color: #ffffff;
+  border: none;
+  border-radius: 7px;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+
+.google-connect-btn:hover:not(:disabled) {
+  background: #243420;
+}
+
+.google-connect-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.google-notnow-btn {
+  background: transparent;
+  color: #63755c;
+  border: 1px solid #cdd8c8;
+  border-radius: 7px;
+  padding: 7px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.google-notnow-btn:hover {
+  background: rgba(255, 255, 255, 0.6);
+  color: #2b3b26;
+}
+
+.google-disconnect-btn {
+  background: transparent;
+  color: #b91c1c;
+  border: 1px solid #f2c7c7;
+  border-radius: 7px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.google-disconnect-btn:hover:not(:disabled) {
+  background: #fee2e2;
+}
+
+.google-close-btn {
+  background: none;
+  border: none;
+  color: #7b8f75;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+.google-close-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+/* Live sync badges and buttons */
+.live-sync-banner {
+  background: linear-gradient(135deg, #f0f6ee 0%, #e5efe2 100%) !important;
+  border-color: #bcd1b6 !important;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.live-sync-badge-pill {
+  display: inline-block;
+  background: #2e6628;
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  text-transform: uppercase;
+}
+
+.banner-sync-btn {
+  background: #ffffff;
+  border: 1px solid #b3c9ad;
+  color: #2e4a27;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.banner-sync-btn:hover:not(:disabled) {
+  background: #eef5eb;
+  border-color: #92b08a;
+}
+
+.banner-connect-btn {
+  background: #395234;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.2s;
+}
+
+.banner-connect-btn:hover {
+  background: #253721;
+}
+
+/* Google Sync Badge in Topbar */
+.google-sync-badge-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.google-sync-badge-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: #ffffff;
+  border: 1px solid #d4ded0;
+  border-radius: 20px;
+  padding: 5px 11px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: #3b4c37;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.google-sync-badge-btn:hover {
+  background: #f7faf5;
+  border-color: #b7c8b2;
+}
+
+.google-sync-badge-btn.connected {
+  border-color: #b5ceb0;
+  background: #f4f8f2;
+}
+
+.google-sync-badge-btn.syncing {
+  border-color: #eab308;
+}
+
+.google-badge-svg {
+  flex-shrink: 0;
+}
+
+.badge-text {
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-status-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sync-status-indicator.online {
+  background: #22c55e;
+}
+
+.sync-status-indicator.offline {
+  background: #9ca3af;
+}
+
+.sync-status-indicator.pulsing {
+  background: #eab308;
+  animation: pulse-sync 1.2s infinite;
+}
+
+@keyframes pulse-sync {
+  0% { transform: scale(0.9); opacity: 0.6; }
+  50% { transform: scale(1.2); opacity: 1; }
+  100% { transform: scale(0.9); opacity: 0.6; }
+}
+
+.google-sync-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 260px;
+  background: #ffffff;
+  border: 1px solid #d4ded0;
+  border-radius: 12px;
+  box-shadow: 0 10px 25px -5px rgba(35, 45, 30, 0.15), 0 4px 6px -2px rgba(35, 45, 30, 0.05);
+  padding: 14px;
+  z-index: 1000;
+}
+
+.popover-header {
+  border-bottom: 1px solid #edf2ea;
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+}
+
+.popover-eyebrow {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.7px;
+  color: #7b8f75;
+  text-transform: uppercase;
+}
+
+.popover-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #273723;
+  margin: 2px 0 0 0;
+}
+
+.popover-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.popover-info-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+}
+
+.popover-info-item .info-label {
+  color: #6a7c65;
+}
+
+.popover-info-item .info-value {
+  font-weight: 600;
+  color: #273723;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popover-desc {
+  font-size: 11px;
+  color: #556650;
+  line-height: 1.4;
+  margin: 0 0 6px 0;
+}
+
+.popover-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.popover-sync-btn {
+  flex: 1;
+  background: #395234;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.popover-sync-btn:hover:not(:disabled) {
+  background: #253721;
+}
+
+.popover-disconnect-btn {
+  background: transparent;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.popover-disconnect-btn:hover:not(:disabled) {
+  background: #fee2e2;
+}
+
+.popover-connect-btn {
+  width: 100%;
+  background: #395234;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.popover-connect-btn:hover:not(:disabled) {
+  background: #253721;
+}
+
+/* Tag pills */
+.google-pill {
+  background: #e8f0fe !important;
+  color: #1a73e8 !important;
+  border: 1px solid #c2d7fa !important;
+  font-size: 9px !important;
+  font-weight: 700 !important;
+}
+
+.event-demo-tag.google-tag {
+  background: #e8f0fe !important;
+  color: #1a73e8 !important;
+  border-color: #c2d7fa !important;
+}
+
+.agenda-event-card.interactive {
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.agenda-event-card.interactive:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(45, 60, 40, 0.08);
+}
+

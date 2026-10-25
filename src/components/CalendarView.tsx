@@ -4,24 +4,51 @@ import type { CalendarCategory, CalendarEvent } from "../types";
 interface CalendarViewProps {
   events: CalendarEvent[];
   onAddEvent: (event: Omit<CalendarEvent, "id">) => void;
+  onEditEvent?: (id: string, updates: Partial<CalendarEvent>) => void;
+  onDeleteEvent?: (id: string) => void;
   onAskEcho: (prompt: string) => void;
+  isGoogleConnected?: boolean;
+  googleEmail?: string | null;
+  onSyncGoogle?: () => void;
+  isSyncing?: boolean;
+  onConnectGoogle?: () => void;
 }
 
 export function CalendarView({
   events,
   onAddEvent,
+  onEditEvent,
+  onDeleteEvent,
   onAskEcho,
+  isGoogleConnected = false,
+  googleEmail,
+  onSyncGoogle,
+  isSyncing = false,
+  onConnectGoogle,
 }: CalendarViewProps) {
-  const [selectedDate, setSelectedDate] = useState("2026-10-20");
+  // Use today's date format YYYY-MM-DD
+  const todayStr = new Date().toISOString().split("T")[0];
+  const [selectedDate, setSelectedDate] = useState(todayStr);
+
+  // Add modal state
   const [showAddModal, setShowAddModal] = useState(false);
   const [newEventTitle, setNewEventTitle] = useState("");
   const [newEventTime, setNewEventTime] = useState("02:00 PM - 03:00 PM");
   const [newEventCategory, setNewEventCategory] = useState<CalendarCategory>("Focus Time");
   const [newEventLocation, setNewEventLocation] = useState("");
 
-  // Month navigation: default October 2026
-  const [currentYear, setCurrentYear] = useState(2026);
-  const [currentMonth, setCurrentMonth] = useState(9); // 0-indexed: 9 = October
+  // Edit / Delete modal state
+  const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editTime, setEditTime] = useState("");
+  const [editCategory, setEditCategory] = useState<CalendarCategory>("Meeting");
+  const [editLocation, setEditLocation] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  // Month navigation: default current month/year
+  const todayDate = new Date();
+  const [currentYear, setCurrentYear] = useState(todayDate.getFullYear());
+  const [currentMonth, setCurrentMonth] = useState(todayDate.getMonth()); // 0-indexed
 
   const monthNames = [
     "January", "February", "March", "April", "May", "June",
@@ -47,9 +74,10 @@ export function CalendarView({
   }
 
   function handleToday() {
-    setCurrentYear(2026);
-    setCurrentMonth(9);
-    setSelectedDate("2026-10-20");
+    const now = new Date();
+    setCurrentYear(now.getFullYear());
+    setCurrentMonth(now.getMonth());
+    setSelectedDate(todayStr);
   }
 
   // Calculate calendar grid days
@@ -99,12 +127,14 @@ export function CalendarView({
 
   // Format selected date nicely
   const selectedDateObj = new Date(selectedDate + "T12:00:00");
-  const formattedSelectedDate = selectedDateObj.toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  });
+  const formattedSelectedDate = isNaN(selectedDateObj.getTime())
+    ? selectedDate
+    : selectedDateObj.toLocaleDateString("en-US", {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      });
 
   function handleCreateEvent(e: React.FormEvent) {
     e.preventDefault();
@@ -116,18 +146,49 @@ export function CalendarView({
       time: newEventTime,
       category: newEventCategory,
       location: newEventLocation.trim() || "Virtual Workspace",
-      isDemo: true,
+      isDemo: !isGoogleConnected,
+      source: isGoogleConnected ? "google" : "local",
     });
 
     setNewEventTitle("");
     setShowAddModal(false);
   }
 
+  function startEditEvent(event: CalendarEvent) {
+    setEditingEvent(event);
+    setEditTitle(event.title);
+    setEditTime(event.time);
+    setEditCategory(event.category);
+    setEditLocation(event.location || "");
+    setConfirmDeleteId(null);
+  }
+
+  function handleSaveEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingEvent || !onEditEvent || !editTitle.trim()) return;
+
+    onEditEvent(editingEvent.id, {
+      title: editTitle.trim(),
+      time: editTime.trim(),
+      category: editCategory,
+      location: editLocation.trim(),
+    });
+
+    setEditingEvent(null);
+  }
+
+  function handleDeleteCurrentEvent() {
+    if (!editingEvent || !onDeleteEvent) return;
+    onDeleteEvent(editingEvent.id);
+    setEditingEvent(null);
+    setConfirmDeleteId(null);
+  }
+
   return (
     <div className="section-container calendar-view">
       <div className="section-header">
         <div className="eyebrow">
-          <span className="pulse-dot" /> CALENDAR WORKSPACE · DEMO PREVIEW
+          <span className="pulse-dot" /> {isGoogleConnected ? "GOOGLE WORKSPACE · LIVE SYNC" : "CALENDAR WORKSPACE"}
         </div>
         <h1 className="section-title">
           Schedule & Rhythm
@@ -135,18 +196,48 @@ export function CalendarView({
           <span className="section-subtitle-span">Designed for clarity.</span>
         </h1>
         <p className="section-description">
-          Review your time commitments and protect your focus. Connect to Google Calendar coming in future milestones.
+          Review your time commitments and protect your focus. Two-way Google Calendar synchronization keeps your schedule effortlessly aligned.
         </p>
       </div>
 
-      <div className="demo-notice-banner">
-        <div className="demo-banner-content">
-          <span className="demo-badge-pill">DEMO DATA</span>
-          <p className="demo-banner-text">
-            All events and schedules below are demonstration data for testing the Echo interface. No external Google accounts are connected yet.
-          </p>
+      {isGoogleConnected ? (
+        <div className="demo-notice-banner live-sync-banner">
+          <div className="demo-banner-content">
+            <span className="live-sync-badge-pill">✓ GOOGLE CALENDAR ACTIVE</span>
+            <p className="demo-banner-text">
+              Connected as <strong>{googleEmail || "Google Account"}</strong>. Changes made in Echo sync to Google Calendar, and your Google events appear here.
+            </p>
+          </div>
+          {onSyncGoogle && (
+            <button
+              type="button"
+              className="banner-sync-btn"
+              onClick={onSyncGoogle}
+              disabled={isSyncing}
+            >
+              {isSyncing ? "↻ Syncing..." : "↻ Refresh Calendar"}
+            </button>
+          )}
         </div>
-      </div>
+      ) : (
+        <div className="demo-notice-banner">
+          <div className="demo-banner-content">
+            <span className="demo-badge-pill">PREVIEW MODE</span>
+            <p className="demo-banner-text">
+              Connect your Google Calendar to synchronize your real-world meetings, focus blocks, and events two-way.
+            </p>
+          </div>
+          {onConnectGoogle && (
+            <button
+              type="button"
+              className="banner-connect-btn"
+              onClick={onConnectGoogle}
+            >
+              Connect Google Calendar
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="calendar-workspace-layout">
         <div className="content-card calendar-grid-card">
@@ -186,13 +277,15 @@ export function CalendarView({
               className="add-event-toggle-btn"
               onClick={() => setShowAddModal(!showAddModal)}
             >
-              {showAddModal ? "Cancel" : "+ Add Demo Event"}
+              {showAddModal ? "Cancel" : isGoogleConnected ? "+ Add Event" : "+ Add Preview Event"}
             </button>
           </div>
 
           {showAddModal && (
             <form className="add-event-form" onSubmit={handleCreateEvent}>
-              <p className="form-title">Add Demo Event for {selectedDate}</p>
+              <p className="form-title">
+                {isGoogleConnected ? "Add Google Calendar Event" : "Add Event"} for {selectedDate}
+              </p>
               <div className="form-grid">
                 <input
                   type="text"
@@ -240,7 +333,7 @@ export function CalendarView({
                   Cancel
                 </button>
                 <button type="submit" className="form-submit-btn">
-                  Save Demo Event
+                  {isGoogleConnected ? "Save to Google Calendar" : "Save Event"}
                 </button>
               </div>
             </form>
@@ -266,7 +359,7 @@ export function CalendarView({
               }
 
               const isSelected = cell.dateString === selectedDate;
-              const isToday = cell.dateString === "2026-10-20";
+              const isToday = cell.dateString === todayStr;
               const dayEvents = events.filter((e) => e.date === cell.dateString);
 
               return (
@@ -309,7 +402,9 @@ export function CalendarView({
               <p className="section-label">SELECTED DAY AGENDA</p>
               <h2 className="card-heading">{formattedSelectedDate}</h2>
             </div>
-            <span className="demo-pill">DEMO SCHEDULE</span>
+            <span className="demo-pill">
+              {isGoogleConnected ? "LIVE SYNCED" : "PREVIEW SCHEDULE"}
+            </span>
           </div>
 
           <div className="agenda-events-list">
@@ -332,10 +427,17 @@ export function CalendarView({
               </div>
             ) : (
               selectedDateEvents.map((event) => (
-                <div key={event.id} className="agenda-event-card">
+                <div
+                  key={event.id}
+                  className="agenda-event-card interactive"
+                  onClick={() => startEditEvent(event)}
+                  title="Click to view or edit event"
+                >
                   <div className="event-time-column">
                     <span className="event-time">{event.time}</span>
-                    <span className="event-demo-tag">DEMO</span>
+                    <span className={`event-demo-tag ${event.source === "google" || event.googleEventId ? "google-tag" : ""}`}>
+                      {event.source === "google" || event.googleEventId ? "GOOGLE" : "PREVIEW"}
+                    </span>
                   </div>
                   <div className="event-details">
                     <div className="event-title-row">
@@ -358,6 +460,116 @@ export function CalendarView({
           </div>
         </div>
       </div>
+
+      {/* Edit / Delete Event Modal */}
+      {editingEvent && (
+        <div className="auth-modal-backdrop" onClick={() => setEditingEvent(null)} role="dialog" aria-modal="true">
+          <div className="auth-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="auth-modal-header">
+              <div className="auth-modal-badge">
+                {editingEvent.source === "google" || editingEvent.googleEventId ? "GOOGLE CALENDAR EVENT" : "EVENT DETAILS"}
+              </div>
+              <button className="auth-modal-close" onClick={() => setEditingEvent(null)} aria-label="Close dialog">
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEdit} className="auth-form" style={{ marginTop: "1rem" }}>
+              <label className="auth-field">
+                <span>Title</span>
+                <input
+                  type="text"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  required
+                />
+              </label>
+
+              <label className="auth-field">
+                <span>Time</span>
+                <input
+                  type="text"
+                  value={editTime}
+                  onChange={(e) => setEditTime(e.target.value)}
+                  placeholder="02:00 PM - 03:00 PM"
+                  required
+                />
+              </label>
+
+              <label className="auth-field">
+                <span>Category</span>
+                <select
+                  value={editCategory}
+                  onChange={(e) => setEditCategory(e.target.value as CalendarCategory)}
+                  className="form-select"
+                  style={{ width: "100%", padding: "0.5rem", borderRadius: "8px", background: "var(--color-surface, #fcfcf9)", border: "1px solid var(--color-border, #e5e5df)" }}
+                >
+                  <option value="Team Sync">Team Sync</option>
+                  <option value="Focus Time">Focus Time</option>
+                  <option value="Meeting">Meeting</option>
+                  <option value="Personal">Personal</option>
+                  <option value="Review">Review</option>
+                </select>
+              </label>
+
+              <label className="auth-field">
+                <span>Location</span>
+                <input
+                  type="text"
+                  value={editLocation}
+                  onChange={(e) => setEditLocation(e.target.value)}
+                  placeholder="Optional meeting link or room"
+                />
+              </label>
+
+              <div className="auth-actions-row" style={{ marginTop: "1.25rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                {confirmDeleteId === editingEvent.id ? (
+                  <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                    <span style={{ fontSize: "0.8rem", color: "#b91c1c" }}>Confirm?</span>
+                    <button
+                      type="button"
+                      className="auth-signout-btn"
+                      onClick={handleDeleteCurrentEvent}
+                      style={{ padding: "0.4rem 0.75rem", fontSize: "0.8rem" }}
+                    >
+                      Yes, delete
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteId(null)}
+                      style={{ background: "none", border: "none", cursor: "pointer", fontSize: "0.8rem", color: "#666" }}
+                    >
+                      No
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="auth-signout-btn"
+                    onClick={() => setConfirmDeleteId(editingEvent.id)}
+                    style={{ padding: "0.5rem 1rem", fontSize: "0.85rem" }}
+                  >
+                    Delete Event
+                  </button>
+                )}
+
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                  <button
+                    type="button"
+                    className="form-cancel-btn"
+                    onClick={() => setEditingEvent(null)}
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="auth-done-btn">
+                    Save Changes
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

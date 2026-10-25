@@ -1,16 +1,27 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { User } from "@supabase/supabase-js";
 import "./App.css";
-import type { CalendarEvent, Message, NavPage, TaskItem } from "./types";
+import type { CalendarEvent, Message, NavPage, TaskItem, GoogleSyncStatus } from "./types";
 import { initialCalendarEvents, initialTasks } from "./data/mockData";
 import { taskService } from "./services/taskService";
 import { getCurrentUser, getCurrentSession, supabase } from "./services/supabaseClient";
 import { sendChatMessage } from "./services/aiService";
+import {
+  getGoogleSyncStatus,
+  linkSessionTokens,
+  fetchGoogleCalendarEvents,
+  createGoogleCalendarEvent,
+  updateGoogleCalendarEvent,
+  deleteGoogleCalendarEvent,
+  connectGoogleWorkspaceOAuth,
+} from "./services/googleSyncService";
 import { MyDayView } from "./components/MyDayView";
 import { CalendarView } from "./components/CalendarView";
 import { TasksView } from "./components/TasksView";
 import { CompanionPanel } from "./components/CompanionPanel";
 import { AuthModal } from "./components/AuthModal";
+import { GoogleConnectPrompt } from "./components/GoogleConnectPrompt";
+import { GoogleSyncBadge } from "./components/GoogleSyncBadge";
 
 const suggestions = [
   { icon: "✍️", title: "Help me write", text: "Help me write something meaningful" },
@@ -28,6 +39,30 @@ function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [isAiResponding, setIsAiResponding] = useState(false);
+  const homeTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Google Workspace two-way synchronization state
+  const [googleSyncStatus, setGoogleSyncStatus] = useState<GoogleSyncStatus>({
+    isConnected: false,
+    calendarConnected: false,
+    tasksConnected: false,
+  });
+  const [isSyncingGoogle, setIsSyncingGoogle] = useState(false);
+  const [showGooglePrompt, setShowGooglePrompt] = useState(() => {
+    try {
+      return localStorage.getItem("echo_google_prompt_dismissed") !== "true";
+    } catch {
+      return true;
+    }
+  });
+
+  // Auto-fit textarea height gracefully capped at 140px max
+  useEffect(() => {
+    if (homeTextareaRef.current) {
+      homeTextareaRef.current.style.height = "auto";
+      homeTextareaRef.current.style.height = `${Math.min(homeTextareaRef.current.scrollHeight, 140)}px`;
+    }
+  }, [input]);
 
   // Milestone 3: Local Persistent Tasks via TaskService
   const [tasks, setTasks] = useState<TaskItem[]>(() => {
@@ -56,13 +91,76 @@ function App() {
     });
   }, []);
 
+  // Synchronize Google Workspace data (Calendar & Tasks)
+  const syncGoogleData = async () => {
+    const session = await getCurrentSession();
+    if (!session) return;
+
+    setIsSyncingGoogle(true);
+    try {
+      const status = await getGoogleSyncStatus();
+      setGoogleSyncStatus(status);
+      taskService.setGoogleConnected(status.isConnected);
+
+      if (status.isConnected) {
+        // Fetch Calendar events
+        try {
+          const calData = await fetchGoogleCalendarEvents();
+          if (calData.events && calData.events.length > 0) {
+            setCalendarEvents((prev) => {
+              const localNonGoogle = prev.filter((e) => !e.googleEventId && e.source !== "google");
+              return [...calData.events, ...localNonGoogle];
+            });
+          }
+        } catch (calErr) {
+          console.warn("[App] Google Calendar sync warning:", calErr);
+        }
+
+        // Fetch Tasks
+        try {
+          const loadedTasks = await taskService.getTasks();
+          setTasks(loadedTasks);
+        } catch (tErr) {
+          console.warn("[App] Google Tasks sync warning:", tErr);
+        }
+      }
+    } catch (err) {
+      console.warn("[App] Google sync status error:", err);
+    } finally {
+      setIsSyncingGoogle(false);
+    }
+  };
+
   // Sync Supabase Authentication state and handle OAuth redirect error detection
   useEffect(() => {
-    getCurrentUser().then((u) => setCurrentUser(u));
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setCurrentUser(session?.user ?? null);
+    getCurrentUser().then((u) => {
+      setCurrentUser(u);
+      if (u) syncGoogleData();
     });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      const user = session?.user ?? null;
+      setCurrentUser(user);
+
+      if (session?.provider_token) {
+        await linkSessionTokens(session.provider_token, session.provider_refresh_token);
+      }
+
+      if (user) {
+        syncGoogleData();
+      } else {
+        setGoogleSyncStatus({ isConnected: false, calendarConnected: false, tasksConnected: false });
+        taskService.setGoogleConnected(false);
+      }
+    });
+
+    // Background/Foreground refresh on window focus
+    function handleWindowFocus() {
+      if (currentUser && googleSyncStatus.isConnected) {
+        syncGoogleData();
+      }
+    }
+    window.addEventListener("focus", handleWindowFocus);
 
     // Check for OAuth callback error in URL parameters or hash
     if (typeof window !== "undefined") {
@@ -97,8 +195,9 @@ function App() {
 
     return () => {
       subscription.unsubscribe();
+      window.removeEventListener("focus", handleWindowFocus);
     };
-  }, []);
+  }, [currentUser, googleSyncStatus.isConnected]);
 
   async function sendMessage(text = input) {
     const message = text.trim();
@@ -253,12 +352,55 @@ function App() {
     }
   }
 
-  function handleAddCalendarEvent(event: Omit<CalendarEvent, "id">) {
+  async function handleAddCalendarEvent(event: Omit<CalendarEvent, "id">) {
+    if (googleSyncStatus.isConnected) {
+      try {
+        const created = await createGoogleCalendarEvent(event);
+        setCalendarEvents((current) => [created, ...current.filter((e) => e.id !== created.id)]);
+        return;
+      } catch (err) {
+        console.warn("[App] Google Calendar event creation failed; saving locally:", err);
+      }
+    }
+
     const newEvent: CalendarEvent = {
       ...event,
       id: `cal-${Date.now()}`,
+      source: "local",
     };
     setCalendarEvents((current) => [...current, newEvent]);
+  }
+
+  async function handleEditCalendarEvent(id: string, updates: Partial<CalendarEvent>) {
+    const existing = calendarEvents.find((e) => e.id === id);
+    if (googleSyncStatus.isConnected && existing && (existing.googleEventId || existing.source === "google")) {
+      const gId = existing.googleEventId || existing.id;
+      try {
+        const updated = await updateGoogleCalendarEvent(gId, updates);
+        setCalendarEvents((current) => current.map((e) => (e.id === id ? updated : e)));
+        return;
+      } catch (err) {
+        console.warn("[App] Google Calendar event update failed; updating locally:", err);
+      }
+    }
+
+    setCalendarEvents((current) =>
+      current.map((e) => (e.id === id ? { ...e, ...updates } : e))
+    );
+  }
+
+  async function handleDeleteCalendarEvent(id: string) {
+    const existing = calendarEvents.find((e) => e.id === id);
+    if (googleSyncStatus.isConnected && existing && (existing.googleEventId || existing.source === "google")) {
+      const gId = existing.googleEventId || existing.id;
+      try {
+        await deleteGoogleCalendarEvent(gId);
+      } catch (err) {
+        console.warn("[App] Google Calendar event delete failed; removing locally:", err);
+      }
+    }
+
+    setCalendarEvents((current) => current.filter((e) => e.id !== id));
   }
 
   return (
@@ -348,6 +490,16 @@ function App() {
                 )}
               </button>
             )}
+            <GoogleSyncBadge
+              status={googleSyncStatus}
+              isSyncing={isSyncingGoogle}
+              onSyncNow={syncGoogleData}
+              onStatusChange={(newStatus) => {
+                setGoogleSyncStatus(newStatus);
+                taskService.setGoogleConnected(newStatus.isConnected);
+                if (newStatus.isConnected) syncGoogleData();
+              }}
+            />
             <button
               type="button"
               className="avatar-btn"
@@ -389,6 +541,25 @@ function App() {
                 Think out loud, find your direction, and make room for what truly matters.
               </p>
             </div>
+
+            {currentUser && !googleSyncStatus.isConnected && showGooglePrompt && (
+              <GoogleConnectPrompt
+                status={googleSyncStatus}
+                onStatusChange={(newStatus) => {
+                  setGoogleSyncStatus(newStatus);
+                  taskService.setGoogleConnected(newStatus.isConnected);
+                  if (newStatus.isConnected) syncGoogleData();
+                }}
+                onDismiss={() => {
+                  setShowGooglePrompt(false);
+                  try {
+                    localStorage.setItem("echo_google_prompt_dismissed", "true");
+                  } catch {
+                    // ignore
+                  }
+                }}
+              />
+            )}
 
             <div className="chat-area">
               {messages.length === 0 ? (
@@ -478,6 +649,7 @@ function App() {
                 }}
               >
                 <textarea
+                  ref={homeTextareaRef}
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={(event) => {
@@ -491,7 +663,7 @@ function App() {
                     }
                   }}
                   placeholder="Tell Echo what's on your mind..."
-                  rows={2}
+                  rows={1}
                   aria-label="Message Echo"
                 />
                 <div className="composer-footer">
@@ -552,6 +724,25 @@ function App() {
             }`}
           >
             <div className="workspace-main-content">
+              {currentUser && !googleSyncStatus.isConnected && showGooglePrompt && (
+                <GoogleConnectPrompt
+                  status={googleSyncStatus}
+                  onStatusChange={(newStatus) => {
+                    setGoogleSyncStatus(newStatus);
+                    taskService.setGoogleConnected(newStatus.isConnected);
+                    if (newStatus.isConnected) syncGoogleData();
+                  }}
+                  onDismiss={() => {
+                    setShowGooglePrompt(false);
+                    try {
+                      localStorage.setItem("echo_google_prompt_dismissed", "true");
+                    } catch {
+                      // ignore
+                    }
+                  }}
+                />
+              )}
+
               {activePage === "My day" && (
                 <MyDayView
                   tasks={tasks}
@@ -565,7 +756,14 @@ function App() {
                 <CalendarView
                   events={calendarEvents}
                   onAddEvent={handleAddCalendarEvent}
+                  onEditEvent={handleEditCalendarEvent}
+                  onDeleteEvent={handleDeleteCalendarEvent}
                   onAskEcho={(prompt) => sendMessage(prompt)}
+                  isGoogleConnected={googleSyncStatus.isConnected}
+                  googleEmail={googleSyncStatus.googleEmail}
+                  onSyncGoogle={syncGoogleData}
+                  isSyncing={isSyncingGoogle}
+                  onConnectGoogle={() => connectGoogleWorkspaceOAuth()}
                 />
               )}
 
@@ -578,6 +776,11 @@ function App() {
                   onDeleteTask={handleDeleteTask}
                   onResetTasks={handleResetTasks}
                   onAskEcho={(prompt) => sendMessage(prompt)}
+                  isGoogleConnected={googleSyncStatus.isConnected}
+                  googleEmail={googleSyncStatus.googleEmail}
+                  onSyncGoogle={syncGoogleData}
+                  isSyncing={isSyncingGoogle}
+                  onConnectGoogle={() => connectGoogleWorkspaceOAuth()}
                 />
               )}
             </div>

@@ -1,3 +1,4 @@
+import { useRef, useEffect } from "react";
 import type { Message, NavPage } from "../types";
 
 interface CompanionPanelProps {
@@ -51,6 +52,15 @@ export function CompanionPanel({
     { icon: "💡", title: "Ask Echo", text: "Help me find clarity with my current task" },
     { icon: "✍️", title: "Reflect", text: "Help me reflect on today's progress" },
   ];
+
+  const panelTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (panelTextareaRef.current) {
+      panelTextareaRef.current.style.height = "auto";
+      panelTextareaRef.current.style.height = `${Math.min(panelTextareaRef.current.scrollHeight, 110)}px`;
+    }
+  }, [input]);
 
   if (isCollapsed) {
     return (
@@ -195,6 +205,7 @@ export function CompanionPanel({
           }}
         >
           <textarea
+            ref={panelTextareaRef}
             value={input}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={(event) => {
@@ -208,7 +219,7 @@ export function CompanionPanel({
               }
             }}
             placeholder={`Ask Echo about ${activePage.toLowerCase()}...`}
-            rows={2}
+            rows={1}
             aria-label="Message Echo"
           />
           <div className="composer-footer">

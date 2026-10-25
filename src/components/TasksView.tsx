@@ -9,6 +9,11 @@ interface TasksViewProps {
   onDeleteTask: (id: string) => void;
   onResetTasks?: () => void;
   onAskEcho: (prompt: string) => void;
+  isGoogleConnected?: boolean;
+  googleEmail?: string | null;
+  onSyncGoogle?: () => void;
+  isSyncing?: boolean;
+  onConnectGoogle?: () => void;
 }
 
 type FilterType = "All" | "Today" | "Work" | "Personal" | "Completed";
@@ -21,6 +26,11 @@ export function TasksView({
   onDeleteTask,
   onResetTasks,
   onAskEcho,
+  isGoogleConnected = false,
+  googleEmail,
+  onSyncGoogle,
+  isSyncing = false,
+  onConnectGoogle,
 }: TasksViewProps) {
   const [filter, setFilter] = useState<FilterType>("All");
 
@@ -137,12 +147,44 @@ export function TasksView({
         </p>
       </div>
 
-      <div className="storage-status-banner">
-        <span className="storage-badge-pill">LOCAL PERSISTENCE</span>
-        <span className="storage-status-text">
-          Saved to browser local storage · Architecture ready for Google Tasks sync in a future milestone.
-        </span>
-      </div>
+      {isGoogleConnected ? (
+        <div className="storage-status-banner live-sync-banner">
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+            <span className="live-sync-badge-pill">✓ GOOGLE TASKS ACTIVE</span>
+            <span className="storage-status-text">
+              Connected as <strong>{googleEmail || "Google Account"}</strong>. Actions sync directly with your Google Tasks list.
+            </span>
+          </div>
+          {onSyncGoogle && (
+            <button
+              type="button"
+              className="banner-sync-btn"
+              onClick={onSyncGoogle}
+              disabled={isSyncing}
+            >
+              {isSyncing ? "↻ Syncing..." : "↻ Refresh Tasks"}
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="storage-status-banner">
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+            <span className="storage-badge-pill">LOCAL PERSISTENCE</span>
+            <span className="storage-status-text">
+              Saved to browser local storage · Connect Google Tasks for automatic two-way synchronization.
+            </span>
+          </div>
+          {onConnectGoogle && (
+            <button
+              type="button"
+              className="banner-connect-btn"
+              onClick={onConnectGoogle}
+            >
+              Connect Google Tasks
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="tasks-progress-card">
         <div className="progress-info-row">
@@ -438,6 +480,11 @@ export function TasksView({
                   >
                     <span className="task-item-title">{task.title}</span>
                     <div className="task-item-meta">
+                      {(task.source === "google" || task.googleTaskId) && (
+                        <span className="tag-pill google-pill" title="Synchronized with Google Tasks">
+                          Google Task
+                        </span>
+                      )}
                       <span className="tag-pill due-pill">
                         📅 {task.dueDate}
                       </span>
